@@ -66,7 +66,7 @@ struct ContentView: View {
     }
     
     func startHealthDecay() {
-        Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
+        Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { _ in
             decreaseHealth()
         }
     }

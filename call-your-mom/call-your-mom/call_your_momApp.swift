@@ -11,7 +11,7 @@ import SwiftUI
 struct call_your_momApp: App {
     var body: some Scene {
         WindowGroup {
-            DashboardView()
+            MainTabView()
         }
     }
 }
