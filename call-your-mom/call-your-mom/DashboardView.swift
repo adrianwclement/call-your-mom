@@ -12,7 +12,13 @@ struct DashboardView: View {
     @State private var quickActionsExpanded = false
     @State private var health: Double = 68
     @State private var callsLogged: Int = 1
+    @State private var logName: String = ""
+    @State private var logMinutes: String = ""
     @State private var healthPulse = false
+    @State private var callLogs: [CallLogEntry] = [
+        CallLogEntry(name: "Mom", minutes: 18),
+        CallLogEntry(name: "Dad", minutes: 9)
+    ]
     @State private var notifications: [InboxItem] = [
         InboxItem(title: "Daily reminder ready", subtitle: "Send a quick check-in before 8 PM.", kind: .reminder),
         InboxItem(title: "3-day streak active", subtitle: "One more call tomorrow keeps it going.", kind: .streak),
@@ -54,7 +60,7 @@ struct DashboardView: View {
                 ActionDock(
                     activePage: $activePage,
                     metrics: metrics,
-                    onLogCall: logCall
+                    onLogTap: { activePage = .log }
                 )
                 .padding(.horizontal, metrics.horizontalPadding)
                 .padding(.top, 8)
@@ -100,9 +106,20 @@ struct DashboardView: View {
         .scrollBounceBehavior(.basedOnSize)
     }
 
-    private func logCall() {
+    private func logCall(name: String, minutes: Int) {
         callsLogged += 1
-        health = min(health + 22, 100)
+        callLogs.insert(CallLogEntry(name: name, minutes: minutes), at: 0)
+        health = min(health + max(12, min(Double(minutes), 25)), 100)
+        notifications.insert(
+            InboxItem(
+                title: "Logged call with \(name)",
+                subtitle: "\(minutes) minute\(minutes == 1 ? "" : "s") added to your streak momentum.",
+                kind: .streak
+            ),
+            at: 0
+        )
+        logName = ""
+        logMinutes = ""
     }
 
     private func decreaseHealth() {
@@ -119,13 +136,31 @@ struct DashboardView: View {
     private func detailPage(metrics: LayoutMetrics, page: HomePage) -> some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: metrics.sectionSpacing) {
-                DetailPageCard(page: page, items: notifications)
+                if page == .log {
+                    LogPageCard(
+                        name: $logName,
+                        minutes: $logMinutes,
+                        entries: callLogs,
+                        onSubmit: submitLogEntry
+                    )
+                } else {
+                    DetailPageCard(page: page, items: notifications)
+                }
             }
             .padding(.horizontal, metrics.horizontalPadding)
             .padding(.bottom, metrics.contentBottomPadding)
             .frame(maxWidth: .infinity, minHeight: metrics.minContentHeight)
         }
         .scrollBounceBehavior(.basedOnSize)
+    }
+
+    private func submitLogEntry() {
+        let trimmedName = logName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty, let minutes = Int(logMinutes), minutes > 0 else {
+            return
+        }
+
+        logCall(name: trimmedName, minutes: minutes)
     }
 }
 
@@ -469,6 +504,134 @@ private struct DetailPageCard: View {
     }
 }
 
+private struct LogPageCard: View {
+    @Binding var name: String
+    @Binding var minutes: String
+    let entries: [CallLogEntry]
+    let onSubmit: () -> Void
+
+    private var formIsValid: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (Int(minutes) ?? 0) > 0
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Log a Call")
+                .font(.system(size: 30, weight: .black, design: .rounded))
+                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+
+            Text("Add who you called and how long you talked so the dashboard can track your recent check-ins.")
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color(red: 0.31, green: 0.45, blue: 0.50))
+
+            VStack(alignment: .leading, spacing: 14) {
+                LogInputField(title: "Name", placeholder: "Mom", text: $name)
+                LogInputField(title: "Minutes", placeholder: "15", text: $minutes, isNumeric: true)
+
+                Button(action: onSubmit) {
+                    HStack {
+                        Image(systemName: "phone.badge.plus.fill")
+                            .font(.system(size: 15, weight: .bold))
+                        Text("Save Call")
+                            .font(.system(size: 16, weight: .black, design: .rounded))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(formIsValid ? Color(red: 0.12, green: 0.76, blue: 0.60) : Color(red: 0.67, green: 0.78, blue: 0.77))
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(!formIsValid)
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Recent Calls")
+                    .font(.system(size: 18, weight: .black, design: .rounded))
+                    .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+
+                ForEach(entries) { entry in
+                    CallLogRow(entry: entry)
+                }
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 30, style: .continuous)
+                .fill(Color.white.opacity(0.78))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 30, style: .continuous)
+                        .stroke(Color.white.opacity(0.58), lineWidth: 1)
+                )
+        )
+        .shadow(color: Color.black.opacity(0.10), radius: 20, y: 10)
+    }
+}
+
+private struct LogInputField: View {
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+    var isNumeric = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+
+            TextField(placeholder, text: $text)
+                .keyboardType(isNumeric ? .numberPad : .default)
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.white.opacity(0.88))
+                )
+        }
+    }
+}
+
+private struct CallLogRow: View {
+    let entry: CallLogEntry
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(Color(red: 0.86, green: 0.96, blue: 0.94))
+                    .frame(width: 42, height: 42)
+
+                Image(systemName: "phone.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(Color(red: 0.11, green: 0.62, blue: 0.54))
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(entry.name)
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+
+                Text("\(entry.minutes) minute\(entry.minutes == 1 ? "" : "s")")
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color(red: 0.39, green: 0.49, blue: 0.54))
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.72))
+        )
+    }
+}
+
 private struct DetailBullet: View {
     let text: String
 
@@ -518,7 +681,7 @@ private struct InboxRow: View {
 private struct ActionDock: View {
     @Binding var activePage: HomePage
     let metrics: LayoutMetrics
-    let onLogCall: () -> Void
+    let onLogTap: () -> Void
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 10) {
@@ -529,7 +692,7 @@ private struct ActionDock: View {
                     metrics: metrics,
                     onTap: {
                         if page == .log {
-                            onLogCall()
+                            onLogTap()
                         } else {
                             activePage = page
                         }
@@ -736,6 +899,12 @@ private struct InboxItem: Identifiable {
     let title: String
     let subtitle: String
     let kind: Kind
+}
+
+private struct CallLogEntry: Identifiable {
+    let id = UUID()
+    let name: String
+    let minutes: Int
 }
 
 private enum HomePage: CaseIterable {

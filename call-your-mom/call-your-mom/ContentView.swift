@@ -62,11 +62,11 @@ struct ContentView: View {
     }
     
     func decreaseHealth() {
-        health = max(health - 5, 0)
+        health = max(health - 1, 0)
     }
     
     func startHealthDecay() {
-        Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { _ in
+        Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
             decreaseHealth()
         }
     }
