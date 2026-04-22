@@ -36,6 +36,9 @@ struct DashboardView: View {
     @State private var streakTier: Int = 1
     @State private var selectedTheme: AppTheme = .meadow
     @State private var streakDays: Int = 0
+    @State private var isGameMode = false
+    @State private var isLaunchingGame = false
+    @State private var gameEntryProgress: CGFloat = 0
     private let decayTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var notifications: [InboxItem] {
@@ -45,9 +48,23 @@ struct DashboardView: View {
     var body: some View {
         GeometryReader { geometry in
             let metrics = LayoutMetrics(container: geometry.size, safeArea: geometry.safeAreaInsets)
+            let showingGame = activePage == .home && (isGameMode || isLaunchingGame)
 
             ZStack {
                 AppSceneBackground(theme: selectedTheme)
+
+                if showingGame {
+                    FlappyTamagotchiGameView(
+                        theme: selectedTheme,
+                        health: health,
+                        sprite: selectedSprite,
+                        clothing: selectedClothing,
+                        birdVisible: !isLaunchingGame,
+                        onExit: exitGameMode
+                    )
+                    .allowsHitTesting(isGameMode)
+                    .zIndex(0)
+                }
 
                 VStack(spacing: metrics.sectionSpacing) {
                     HomeTopBar(
@@ -65,34 +82,56 @@ struct DashboardView: View {
                     )
                     .padding(.top, metrics.topPadding)
                     .padding(.horizontal, metrics.horizontalPadding)
+                    .opacity(showingGame ? 0 : 1)
+                    .offset(y: showingGame ? -80 : 0)
+                    .allowsHitTesting(!showingGame)
 
                     Group {
                         if activePage == .home {
-                            homeView(metrics: metrics)
+                            homeView(metrics: metrics, isShowingGame: showingGame, isLaunchingGame: isLaunchingGame)
                         } else {
                             detailPage(metrics: metrics, page: activePage)
                         }
                     }
+                    .offset(y: showingGame ? 120 : 0)
+                    .opacity(showingGame ? 0 : 1)
+                    .allowsHitTesting(!showingGame)
+                }
+
+                if activePage == .home && isLaunchingGame {
+                    LaunchingGameSpriteOverlay(
+                        containerSize: geometry.size,
+                        metrics: metrics,
+                        progress: gameEntryProgress,
+                        health: health,
+                        sprite: selectedSprite,
+                        clothing: selectedClothing
+                    )
+                    .allowsHitTesting(false)
+                    .zIndex(2)
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                ActionDock(
-                    activePage: $activePage,
-                    metrics: metrics,
-                    onLogTap: { navigate(to: .log) },
-                    onSelectPage: navigate
-                )
-                .padding(.horizontal, metrics.horizontalPadding)
-                .padding(.top, 8)
-                .padding(.bottom, metrics.dockOuterBottomPadding)
-                .background(
-                    LinearGradient(
-                        colors: [Color.clear, Color.black.opacity(0.10)],
-                        startPoint: .top,
-                        endPoint: .bottom
+                if !showingGame {
+                    ActionDock(
+                        activePage: $activePage,
+                        metrics: metrics,
+                        onLogTap: { navigate(to: .log) },
+                        onSelectPage: navigate
                     )
-                    .ignoresSafeArea()
-                )
+                    .padding(.horizontal, metrics.horizontalPadding)
+                    .padding(.top, 8)
+                    .padding(.bottom, metrics.dockOuterBottomPadding)
+                    .background(
+                        LinearGradient(
+                            colors: [Color.clear, Color.black.opacity(0.10)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .ignoresSafeArea()
+                    )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
             .ignoresSafeArea()
         }
@@ -151,7 +190,7 @@ struct DashboardView: View {
     }
 
     @ViewBuilder
-    private func homeView(metrics: LayoutMetrics) -> some View {
+    private func homeView(metrics: LayoutMetrics, isShowingGame: Bool, isLaunchingGame: Bool) -> some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: metrics.sectionSpacing) {
                 if quickActionsExpanded {
@@ -165,7 +204,10 @@ struct DashboardView: View {
                     health: health,
                     sprite: selectedSprite,
                     clothing: selectedClothing,
-                    danceSpeed: selectedDanceSpeed
+                    danceSpeed: selectedDanceSpeed,
+                    isGameMode: isShowingGame,
+                    hidesSprite: isLaunchingGame,
+                    onLaunchGame: enterGameMode
                 )
 
                 Spacer(minLength: 0)
@@ -476,18 +518,49 @@ struct DashboardView: View {
     }
 
     private func navigate(to page: HomePage) {
+        if isGameMode {
+            exitGameMode()
+        }
         guard page != activePage else { return }
         pageHistory.append(activePage)
         activePage = page
     }
 
     private func goBack() {
+        if isGameMode {
+            exitGameMode()
+            return
+        }
         guard activePage != .home else { return }
 
         if let previousPage = pageHistory.popLast() {
             activePage = previousPage
         } else {
             activePage = .home
+        }
+    }
+
+    private func enterGameMode() {
+        guard activePage == .home, !isGameMode, !isLaunchingGame else { return }
+        quickActionsExpanded = false
+        isLaunchingGame = true
+        gameEntryProgress = 0
+        withAnimation(.spring(response: 0.56, dampingFraction: 0.88)) {
+            gameEntryProgress = 1
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+            guard isLaunchingGame else { return }
+            isGameMode = true
+            isLaunchingGame = false
+        }
+    }
+
+    private func exitGameMode() {
+        guard isGameMode || isLaunchingGame else { return }
+        withAnimation(.spring(response: 0.52, dampingFraction: 0.88)) {
+            isGameMode = false
+            isLaunchingGame = false
+            gameEntryProgress = 0
         }
     }
 }
@@ -717,32 +790,70 @@ private struct IntegratedTamagotchiStage: View {
     let sprite: SpriteProfile
     let clothing: ClothingOption
     let danceSpeed: DanceSpeed
+    let isGameMode: Bool
+    let hidesSprite: Bool
+    let onLaunchGame: () -> Void
     @State private var dancePhase = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            PixelTamagotchi(health: health, sprite: sprite, clothing: clothing)
-                .offset(y: dancePhase ? -18 : -6)
-                .animation(
-                    .easeInOut(duration: danceSpeed.duration).repeatForever(autoreverses: true),
-                    value: dancePhase
-                )
+            if !hidesSprite {
+                PixelTamagotchi(health: health, sprite: sprite, clothing: clothing)
+                    .offset(y: dancePhase ? -18 : -6)
+                    .animation(
+                        .easeInOut(duration: danceSpeed.duration).repeatForever(autoreverses: true),
+                        value: dancePhase
+                    )
+            }
 
             Ellipse()
                 .fill(Color.black.opacity(0.10))
                 .frame(width: 120, height: 20)
                 .blur(radius: 4)
                 .offset(y: 28)
+
+            if !isGameMode {
+                VStack {
+                    Spacer()
+
+                    Button(action: onLaunchGame) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 13, weight: .black))
+                            Text("Play")
+                                .font(.system(size: 14, weight: .black, design: .rounded))
+                        }
+                        .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 11)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.white.opacity(0.84))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .offset(y: 54)
+                }
+            }
         }
         .frame(height: 300)
         .onAppear {
-            dancePhase = true
+            startDance()
         }
         .onChange(of: danceSpeed) {
-            dancePhase = false
-            withAnimation(.easeInOut(duration: danceSpeed.duration).repeatForever(autoreverses: true)) {
-                dancePhase = true
+            startDance()
+        }
+        .onChange(of: isGameMode) { _, newValue in
+            if !newValue {
+                startDance()
             }
+        }
+    }
+
+    private func startDance() {
+        dancePhase = false
+        withAnimation(.easeInOut(duration: danceSpeed.duration).repeatForever(autoreverses: true)) {
+            dancePhase = true
         }
     }
 }
@@ -751,30 +862,37 @@ private struct PixelTamagotchi: View {
     let health: Double
     let sprite: SpriteProfile
     let clothing: ClothingOption
+    var artSize: CGFloat = 150
+    var showsLabels: Bool = true
+    var showsBadge: Bool = true
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: showsLabels ? 10 : 0) {
             ZStack(alignment: .topTrailing) {
                 PixelCharacterGrid(
                     pixels: pixelRows,
                     palette: pixelPalette
                 )
-                .frame(width: 150, height: 150)
+                .frame(width: artSize, height: artSize)
                 .drawingGroup()
 
-                Image(systemName: sprite.badgeSymbol)
-                    .font(.system(size: 16, weight: .black))
-                    .foregroundStyle(sprite.badgeColor)
-                    .offset(x: -8, y: 6)
+                if showsBadge {
+                    Image(systemName: sprite.badgeSymbol)
+                        .font(.system(size: max(12, artSize * 0.11), weight: .black))
+                        .foregroundStyle(sprite.badgeColor)
+                        .offset(x: -8, y: 6)
+                }
             }
 
-            Text(healthLabel)
-                .font(.system(size: 15, weight: .black, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.92))
+            if showsLabels {
+                Text(healthLabel)
+                    .font(.system(size: 15, weight: .black, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.92))
 
-            Text(sprite.displayName)
-                .font(.system(size: 12, weight: .bold, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.86))
+                Text(sprite.displayName)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.86))
+            }
         }
     }
 
@@ -917,6 +1035,371 @@ private struct PixelCharacterGrid: View {
                 }
             }
         }
+    }
+}
+
+private struct FlappyTamagotchiGameView: View {
+    let theme: AppTheme
+    let health: Double
+    let sprite: SpriteProfile
+    let clothing: ClothingOption
+    let birdVisible: Bool
+    let onExit: () -> Void
+
+    @State private var birdY: CGFloat = 0
+    @State private var birdVelocity: CGFloat = 0
+    @State private var pipes: [FlappyPipe] = []
+    @State private var score = 0
+    @State private var hasStarted = false
+    @State private var isGameOver = false
+    @State private var lastTick = Date()
+
+    private let gameTimer = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+
+            ZStack(alignment: .top) {
+                LinearGradient(
+                    colors: [Color.white.opacity(0.06), Color.black.opacity(0.04), Color.clear],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+
+                ForEach(pipes) { pipe in
+                    FlappyPipeView(pipe: pipe, size: size, tint: theme.pipeColor)
+                }
+
+                if birdVisible {
+                    PixelTamagotchi(
+                        health: health,
+                        sprite: sprite,
+                        clothing: clothing,
+                        artSize: FlappyGameLayout.birdArtSize(for: size),
+                        showsLabels: false,
+                        showsBadge: false
+                    )
+                    .rotationEffect(.degrees(Double(max(-26, min(28, birdVelocity * 0.05)))))
+                    .position(
+                        x: FlappyGameLayout.birdX(for: size),
+                        y: birdY
+                    )
+                    .shadow(color: Color.black.opacity(0.12), radius: 10, y: 8)
+                }
+
+                VStack(spacing: 18) {
+                    HStack(alignment: .center) {
+                        ScorePill(score: score)
+                        Spacer()
+                        Button(action: onExit) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 15, weight: .black))
+                                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                                .frame(width: 40, height: 40)
+                                .background(
+                                    Circle()
+                                        .fill(Color.white.opacity(0.82))
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if !hasStarted {
+                        GamePromptCard(
+                            title: "Flappy Mode",
+                            subtitle: "Tap anywhere to flap."
+                        )
+                    } else if isGameOver {
+                        GamePromptCard(
+                            title: "Try Again",
+                            subtitle: "Tap to restart the run."
+                        )
+                    }
+
+                    Spacer()
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 24)
+
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+            .padding(.horizontal, 14)
+            .padding(.top, 22)
+            .padding(.bottom, 24)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                handleTap(in: size)
+            }
+            .onAppear {
+                resetGame(in: size)
+            }
+            .onReceive(gameTimer) { now in
+                update(now: now, in: size)
+            }
+        }
+        .ignoresSafeArea()
+    }
+
+    private func handleTap(in size: CGSize) {
+        if isGameOver {
+            resetGame(in: size)
+        }
+
+        if !hasStarted {
+            hasStarted = true
+            lastTick = Date()
+        }
+
+        birdVelocity = -285
+    }
+
+    private func update(now: Date, in size: CGSize) {
+        if birdY == 0 {
+            birdY = FlappyGameLayout.birdSpawnY(for: size)
+            lastTick = now
+        }
+
+        guard hasStarted, !isGameOver else {
+            lastTick = now
+            return
+        }
+
+        let deltaTime = min(max(now.timeIntervalSince(lastTick), 0), 1.0 / 20.0)
+        lastTick = now
+
+        birdVelocity += CGFloat(710 * deltaTime)
+        birdY += birdVelocity * CGFloat(deltaTime)
+
+        let pipeSpeed = max(148, size.width * 0.34)
+        let pipeWidth = max(72, size.width * 0.16)
+        let birdX = size.width * 0.30
+        let birdSize = max(72, min(96, size.width * 0.18))
+
+        for index in pipes.indices {
+            pipes[index].x -= pipeSpeed * CGFloat(deltaTime)
+            if !pipes[index].didScore, pipes[index].x + pipeWidth / 2 < birdX {
+                pipes[index].didScore = true
+                score += 1
+            }
+        }
+
+        pipes.removeAll { $0.x < -pipeWidth }
+
+        let spacingBase = max(220, size.width * 0.50)
+        while pipes.count < 3 {
+            let nextX = (pipes.last?.x ?? (size.width + 120)) + randomPipeSpacing(base: spacingBase)
+            pipes.append(randomPipe(at: nextX))
+        }
+
+        if birdY < birdSize * 0.4 || birdY > size.height - birdSize * 0.32 {
+            isGameOver = true
+            return
+        }
+
+        let birdRect = CGRect(
+            x: birdX - birdSize * 0.32,
+            y: birdY - birdSize * 0.28,
+            width: birdSize * 0.64,
+            height: birdSize * 0.56
+        )
+
+        for pipe in pipes {
+            let gapHeight = pipe.gapHeight(for: size.height)
+            let gapCenterY = size.height * CGFloat(pipe.gapCenterRatio)
+            let upperRect = CGRect(x: pipe.x - pipeWidth / 2, y: 0, width: pipeWidth, height: gapCenterY - gapHeight / 2)
+            let lowerRect = CGRect(
+                x: pipe.x - pipeWidth / 2,
+                y: gapCenterY + gapHeight / 2,
+                width: pipeWidth,
+                height: size.height - (gapCenterY + gapHeight / 2)
+            )
+
+            if birdRect.intersects(upperRect) || birdRect.intersects(lowerRect) {
+                isGameOver = true
+                return
+            }
+        }
+    }
+
+    private func resetGame(in size: CGSize) {
+        let spacingBase = max(220, size.width * 0.50)
+        birdY = FlappyGameLayout.birdSpawnY(for: size)
+        birdVelocity = 0
+        score = 0
+        hasStarted = false
+        isGameOver = false
+        lastTick = Date()
+        let firstX = size.width + 120
+        let secondX = firstX + randomPipeSpacing(base: spacingBase)
+        let thirdX = secondX + randomPipeSpacing(base: spacingBase)
+        pipes = [
+            randomPipe(at: firstX),
+            randomPipe(at: secondX),
+            randomPipe(at: thirdX)
+        ]
+    }
+
+    private func randomPipe(at x: CGFloat) -> FlappyPipe {
+        FlappyPipe(
+            x: x,
+            gapCenterRatio: Double.random(in: 0.24...0.76),
+            gapHeightRatio: Double.random(in: 0.21...0.28)
+        )
+    }
+
+    private func randomPipeSpacing(base: CGFloat) -> CGFloat {
+        base + CGFloat.random(in: 18...92)
+    }
+}
+
+private struct LaunchingGameSpriteOverlay: View {
+    let containerSize: CGSize
+    let metrics: LayoutMetrics
+    let progress: CGFloat
+    let health: Double
+    let sprite: SpriteProfile
+    let clothing: ClothingOption
+
+    var body: some View {
+        let startX = containerSize.width * 0.5
+        let startY = metrics.topPadding + metrics.topButtonSize + metrics.sectionSpacing + 176
+        let endX = FlappyGameLayout.birdX(for: containerSize) + FlappyGameLayout.sceneHorizontalPadding
+        let endY = FlappyGameLayout.birdSpawnY(for: containerSize) + FlappyGameLayout.sceneTopPadding
+        let startSize: CGFloat = 150
+        let endSize = FlappyGameLayout.birdArtSize(for: containerSize)
+
+        PixelTamagotchi(
+            health: health,
+            sprite: sprite,
+            clothing: clothing,
+            artSize: startSize + ((endSize - startSize) * progress),
+            showsLabels: false,
+            showsBadge: false
+        )
+        .shadow(color: Color.black.opacity(0.12), radius: 10, y: 8)
+        .position(
+            x: startX + ((endX - startX) * progress),
+            y: startY + ((endY - startY) * progress)
+        )
+    }
+}
+
+private enum FlappyGameLayout {
+    static let sceneHorizontalPadding: CGFloat = 14
+    static let sceneTopPadding: CGFloat = 22
+
+    static func birdArtSize(for size: CGSize) -> CGFloat {
+        max(84, min(112, size.width * 0.22))
+    }
+
+    static func birdX(for size: CGSize) -> CGFloat {
+        size.width * 0.30
+    }
+
+    static func initialBirdY(for size: CGSize) -> CGFloat {
+        size.height * 0.43
+    }
+
+    static func birdSpawnY(for size: CGSize) -> CGFloat {
+        initialBirdY(for: size) - 10
+    }
+}
+
+private struct GamePromptCard: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Text(title)
+                .font(.system(size: 18, weight: .black, design: .rounded))
+                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+
+            Text(subtitle)
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(Color(red: 0.34, green: 0.44, blue: 0.50))
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.82))
+        )
+    }
+}
+
+private struct ScorePill: View {
+    let score: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "gamecontroller.fill")
+                .font(.system(size: 13, weight: .black))
+            Text("\(score)")
+                .font(.system(size: 16, weight: .black, design: .rounded))
+        }
+        .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.white.opacity(0.82))
+        )
+    }
+}
+
+private struct FlappyPipeView: View {
+    let pipe: FlappyPipe
+    let size: CGSize
+    let tint: Color
+
+    var body: some View {
+        let pipeWidth = max(72, size.width * 0.16)
+        let gapHeight = pipe.gapHeight(for: size.height)
+        let gapCenterY = size.height * CGFloat(pipe.gapCenterRatio)
+        let upperHeight = max(40, gapCenterY - gapHeight / 2)
+        let lowerY = gapCenterY + gapHeight / 2
+        let lowerHeight = max(40, size.height - lowerY)
+
+        VStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [tint.opacity(0.95), tint.opacity(0.72)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .frame(width: pipeWidth, height: upperHeight)
+
+            Spacer(minLength: gapHeight)
+
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [tint.opacity(0.95), tint.opacity(0.72)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .frame(width: pipeWidth, height: lowerHeight)
+        }
+        .frame(height: size.height, alignment: .top)
+        .position(x: pipe.x, y: size.height / 2)
+        .shadow(color: Color.black.opacity(0.12), radius: 10, y: 8)
+    }
+}
+
+private struct FlappyPipe: Identifiable {
+    let id = UUID()
+    var x: CGFloat
+    var gapCenterRatio: Double
+    var gapHeightRatio: Double
+    var didScore = false
+
+    func gapHeight(for screenHeight: CGFloat) -> CGFloat {
+        max(168, screenHeight * gapHeightRatio)
     }
 }
 
@@ -2033,6 +2516,17 @@ private enum AppTheme: String, CaseIterable, Identifiable {
             return Color(red: 0.86, green: 0.40, blue: 0.40)
         case .moonlight:
             return Color(red: 0.24, green: 0.40, blue: 0.61)
+        }
+    }
+
+    var pipeColor: Color {
+        switch self {
+        case .meadow:
+            return Color(red: 0.15, green: 0.63, blue: 0.46)
+        case .sunset:
+            return Color(red: 0.79, green: 0.41, blue: 0.32)
+        case .moonlight:
+            return Color(red: 0.33, green: 0.48, blue: 0.74)
         }
     }
 }
