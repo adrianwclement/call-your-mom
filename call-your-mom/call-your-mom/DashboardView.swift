@@ -22,15 +22,15 @@ struct DashboardView: View {
     @State private var lastHealthUpdatedAt = Date()
     @State private var wasBelowLowHealthThreshold = false
     @State private var callLogs: [CallLogEntry] = [
-        CallLogEntry(name: "Mom", minutes: 18),
-        CallLogEntry(name: "Dad", minutes: 9)
+        CallLogEntry(name: "Mom", minutes: 18, loggedAt: Date()),
+        CallLogEntry(name: "Dad", minutes: 9, loggedAt: Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date())
     ]
     @State private var selectedSprite: SpriteProfile = .skyBuddy
     @State private var selectedClothing: ClothingOption = .none
     @State private var selectedDanceSpeed: DanceSpeed = .normal
     @State private var streakTier: Int = 1
     @State private var selectedTheme: AppTheme = .meadow
-    @State private var streakDays: Int = 3
+    @State private var streakDays: Int = 0
     @State private var notifications: [InboxItem] = [
         InboxItem(title: "Daily reminder ready", subtitle: "Send a quick check-in before 8 PM.", kind: .reminder),
         InboxItem(title: "3-day streak active", subtitle: "One more call tomorrow keeps it going.", kind: .streak),
@@ -74,8 +74,7 @@ struct DashboardView: View {
                 ActionDock(
                     activePage: $activePage,
                     metrics: metrics,
-                    onLogTap: { activePage = .log }
-                    onLogCall: logCall,
+                    onLogTap: { activePage = .log },
                     onSelectPage: navigate
                 )
                 .padding(.horizontal, metrics.horizontalPadding)
@@ -98,6 +97,7 @@ struct DashboardView: View {
             }
             LocalNotificationManager.shared.requestAuthorization()
             restorePersistedHealth()
+            refreshStreakDays()
         }
         .onReceive(decayTimer) { _ in
             guard scenePhase == .active else { return }
@@ -147,12 +147,16 @@ struct DashboardView: View {
     private func logCall(name: String, minutes: Int) {
         applyElapsedDecay(now: Date())
         callsLogged += 1
-        callLogs.insert(CallLogEntry(name: name, minutes: minutes), at: 0)
-        health = min(health + max(12, min(Double(minutes), 25)), 100)
+        callLogs.insert(CallLogEntry(name: name, minutes: minutes, loggedAt: Date()), at: 0)
+        refreshStreakDays()
+
+        let streakBonus = Double(streakTier * 2)
+        let healingAmount = max(12, min(Double(minutes), 25)) + streakBonus
+        health = min(health + healingAmount, 100)
         notifications.insert(
             InboxItem(
                 title: "Logged call with \(name)",
-                subtitle: "\(minutes) minute\(minutes == 1 ? "" : "s") added to your streak momentum.",
+                subtitle: "\(minutes) minute\(minutes == 1 ? "" : "s") logged. Current streak: \(streakDays) day\(streakDays == 1 ? "" : "s").",
                 kind: .streak
             ),
             at: 0
@@ -167,17 +171,6 @@ struct DashboardView: View {
         guard updatedHealth != health || lastHealthUpdatedAt != now else { return }
         health = updatedHealth
         lastHealthUpdatedAt = now
-        let streakBonus = Double(streakTier * 2)
-        health = min(health + 18 + streakBonus, 100)
-        streakDays += 1
-    }
-
-    private func decreaseHealth() {
-        let decay = max(1, 4 - streakTier)
-        health = max(health - Double(decay), 0)
-        if health < 18 {
-            streakDays = max(streakDays - 1, 0)
-        }
     }
 
     private func restorePersistedHealth() {
@@ -186,6 +179,7 @@ struct DashboardView: View {
         health = HealthPersistence.decayedHealth(from: persisted.health, since: persisted.updatedAt, now: Date())
         lastHealthUpdatedAt = Date()
         wasBelowLowHealthThreshold = health <= LocalNotificationManager.lowHealthThreshold
+        refreshStreakDays()
     }
 
     private func persistHealthState() {
@@ -221,19 +215,18 @@ struct DashboardView: View {
                         onSubmit: submitLogEntry
                     )
                 } else {
-                    DetailPageCard(page: page, items: notifications)
+                    DetailPageCard(
+                        page: page,
+                        items: notifications,
+                        selectedSprite: $selectedSprite,
+                        selectedClothing: $selectedClothing,
+                        selectedDanceSpeed: $selectedDanceSpeed,
+                        streakTier: $streakTier,
+                        selectedTheme: $selectedTheme,
+                        streakDays: $streakDays,
+                        onRotateSprite: rotateSprite
+                    )
                 }
-                DetailPageCard(
-                    page: page,
-                    items: notifications,
-                    selectedSprite: $selectedSprite,
-                    selectedClothing: $selectedClothing,
-                    selectedDanceSpeed: $selectedDanceSpeed,
-                    streakTier: $streakTier,
-                    selectedTheme: $selectedTheme,
-                    streakDays: $streakDays,
-                    onRotateSprite: rotateSprite
-                )
             }
             .padding(.horizontal, metrics.horizontalPadding)
             .padding(.bottom, metrics.contentBottomPadding)
@@ -249,6 +242,8 @@ struct DashboardView: View {
         }
 
         logCall(name: trimmedName, minutes: minutes)
+    }
+
     private func rotateSprite() {
         let allSprites = SpriteProfile.allCases
         guard let currentIndex = allSprites.firstIndex(of: selectedSprite) else {
@@ -258,6 +253,10 @@ struct DashboardView: View {
 
         let nextIndex = (currentIndex + 1) % allSprites.count
         selectedSprite = allSprites[nextIndex]
+    }
+
+    private func refreshStreakDays() {
+        streakDays = StreakCalculator.currentStreak(from: callLogs)
     }
 
     private func navigate(to page: HomePage) {
@@ -1091,7 +1090,6 @@ private struct ActionDock: View {
     @Binding var activePage: HomePage
     let metrics: LayoutMetrics
     let onLogTap: () -> Void
-    let onLogCall: () -> Void
     let onSelectPage: (HomePage) -> Void
 
     var body: some View {
@@ -1316,6 +1314,31 @@ private struct CallLogEntry: Identifiable {
     let id = UUID()
     let name: String
     let minutes: Int
+    let loggedAt: Date
+}
+
+private enum StreakCalculator {
+    static func currentStreak(from logs: [CallLogEntry], calendar: Calendar = .current) -> Int {
+        let uniqueDays = Set(logs.map { calendar.startOfDay(for: $0.loggedAt) })
+        let today = calendar.startOfDay(for: Date())
+
+        guard uniqueDays.contains(today) else { return 0 }
+
+        var streak = 0
+        var cursor = today
+
+        while uniqueDays.contains(cursor) {
+            streak += 1
+            guard let previousDay = calendar.date(byAdding: .day, value: -1, to: cursor) else {
+                break
+            }
+            cursor = previousDay
+        }
+
+        return streak
+    }
+}
+
 private enum ClothingOption: String, CaseIterable, Identifiable {
     case none
     case propellerHat

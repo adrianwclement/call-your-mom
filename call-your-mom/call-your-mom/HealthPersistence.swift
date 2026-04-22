@@ -13,7 +13,7 @@ enum HealthPersistence {
     private static let updatedAtKey = "health.updatedAt"
     private static let callsLoggedKey = "health.callsLogged"
 
-    static let defaultHealth = 68.0
+    static let defaultHealth = 100.0
     static let defaultCallsLogged = 1
     static let decayAmount = 3.0
     static let decayInterval: TimeInterval = 8.0
