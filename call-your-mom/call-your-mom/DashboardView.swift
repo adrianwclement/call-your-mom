@@ -1058,7 +1058,9 @@ private struct FlappyTamagotchiGameView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let size = geometry.size
+            let containerSize = geometry.size
+            let sceneFrame = FlappyGameLayout.sceneFrame(in: containerSize)
+            let sceneSize = sceneFrame.size
 
             ZStack(alignment: .top) {
                 LinearGradient(
@@ -1068,7 +1070,7 @@ private struct FlappyTamagotchiGameView: View {
                 )
 
                 ForEach(pipes) { pipe in
-                    FlappyPipeView(pipe: pipe, size: size, tint: theme.pipeColor)
+                    FlappyPipeView(pipe: pipe, size: sceneSize, tint: theme.pipeColor)
                 }
 
                 if birdVisible {
@@ -1076,13 +1078,13 @@ private struct FlappyTamagotchiGameView: View {
                         health: health,
                         sprite: sprite,
                         clothing: clothing,
-                        artSize: FlappyGameLayout.birdArtSize(for: size),
+                        artSize: FlappyGameLayout.birdArtSize(for: sceneSize),
                         showsLabels: false,
                         showsBadge: false
                     )
                     .rotationEffect(.degrees(Double(max(-26, min(28, birdVelocity * 0.05)))))
                     .position(
-                        x: FlappyGameLayout.birdX(for: size),
+                        x: FlappyGameLayout.birdX(for: sceneSize),
                         y: birdY
                     )
                     .shadow(color: Color.black.opacity(0.12), radius: 10, y: 8)
@@ -1123,19 +1125,18 @@ private struct FlappyTamagotchiGameView: View {
                 .padding(.top, 24)
 
             }
+            .frame(width: sceneFrame.width, height: sceneFrame.height)
             .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
-            .padding(.horizontal, 14)
-            .padding(.top, 22)
-            .padding(.bottom, 24)
+            .position(x: sceneFrame.midX, y: sceneFrame.midY)
             .contentShape(Rectangle())
             .onTapGesture {
-                handleTap(in: size)
+                handleTap(in: sceneSize)
             }
             .onAppear {
-                resetGame(in: size)
+                resetGame(in: sceneSize)
             }
             .onReceive(gameTimer) { now in
-                update(now: now, in: size)
+                update(now: now, in: sceneSize)
             }
         }
         .ignoresSafeArea()
@@ -1264,10 +1265,11 @@ private struct LaunchingGameSpriteOverlay: View {
     var body: some View {
         let startX = containerSize.width * 0.5
         let startY = metrics.topPadding + metrics.topButtonSize + metrics.sectionSpacing + 176
-        let endX = FlappyGameLayout.birdX(for: containerSize) + FlappyGameLayout.sceneHorizontalPadding
-        let endY = FlappyGameLayout.birdSpawnY(for: containerSize) + FlappyGameLayout.sceneTopPadding
+        let sceneFrame = FlappyGameLayout.sceneFrame(in: containerSize)
+        let endX = sceneFrame.minX + FlappyGameLayout.birdX(for: sceneFrame.size)
+        let endY = sceneFrame.minY + FlappyGameLayout.birdSpawnY(for: sceneFrame.size)
         let startSize: CGFloat = 150
-        let endSize = FlappyGameLayout.birdArtSize(for: containerSize)
+        let endSize = FlappyGameLayout.birdArtSize(for: sceneFrame.size)
 
         PixelTamagotchi(
             health: health,
@@ -1288,6 +1290,7 @@ private struct LaunchingGameSpriteOverlay: View {
 private enum FlappyGameLayout {
     static let sceneHorizontalPadding: CGFloat = 14
     static let sceneTopPadding: CGFloat = 22
+    static let sceneBottomPadding: CGFloat = 24
 
     static func birdArtSize(for size: CGSize) -> CGFloat {
         max(84, min(112, size.width * 0.22))
@@ -1303,6 +1306,15 @@ private enum FlappyGameLayout {
 
     static func birdSpawnY(for size: CGSize) -> CGFloat {
         initialBirdY(for: size) - 10
+    }
+
+    static func sceneFrame(in container: CGSize) -> CGRect {
+        CGRect(
+            x: sceneHorizontalPadding,
+            y: sceneTopPadding,
+            width: max(0, container.width - (sceneHorizontalPadding * 2)),
+            height: max(0, container.height - sceneTopPadding - sceneBottomPadding)
+        )
     }
 }
 
