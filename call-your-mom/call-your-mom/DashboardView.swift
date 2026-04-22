@@ -2,7 +2,7 @@
 //  DashboardView.swift
 //  call-your-mom
 //
-//  Created by Ben Cerbin on 4/21/26.
+//  Created by Ben Cerbin, Adrian Clement, and Dylan O'Connor on 4/21/26.
 //
 
 import SwiftUI
@@ -16,8 +16,13 @@ struct DashboardView: View {
     @State private var quickActionsExpanded = false
     @State private var health = HealthPersistence.defaultHealth
     @State private var callsLogged = HealthPersistence.defaultCallsLogged
-    @State private var logName: String = ""
+    @State private var contacts = SettingsPersistence.defaultSettings.contacts
+    @State private var preferredContactID = SettingsPersistence.defaultSettings.preferredContactID
+    @State private var selectedLogContactID = SettingsPersistence.defaultSettings.preferredContactID
+    @State private var pendingContactName = ""
     @State private var logMinutes: String = ""
+    @State private var defaultCallMinutes = SettingsPersistence.defaultSettings.defaultCallMinutes
+    @State private var notificationPreferences = SettingsPersistence.defaultSettings.notificationPreferences
     @State private var healthPulse = false
     @State private var lastHealthUpdatedAt = Date()
     @State private var wasBelowLowHealthThreshold = false
@@ -31,12 +36,11 @@ struct DashboardView: View {
     @State private var streakTier: Int = 1
     @State private var selectedTheme: AppTheme = .meadow
     @State private var streakDays: Int = 0
-    @State private var notifications: [InboxItem] = [
-        InboxItem(title: "Daily reminder ready", subtitle: "Send a quick check-in before 8 PM.", kind: .reminder),
-        InboxItem(title: "3-day streak active", subtitle: "One more call tomorrow keeps it going.", kind: .streak),
-        InboxItem(title: "Mom replied", subtitle: "Call me when you get a minute.", kind: .message)
-    ]
     private let decayTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private var notifications: [InboxItem] {
+        buildNotifications()
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -50,6 +54,7 @@ struct DashboardView: View {
                         metrics: metrics,
                         isBackVisible: activePage != .home,
                         isQuickActionsExpanded: quickActionsExpanded,
+                        hasNotifications: !notifications.isEmpty,
                         onTitleTap: {
                             withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
                                 quickActionsExpanded.toggle()
@@ -74,7 +79,7 @@ struct DashboardView: View {
                 ActionDock(
                     activePage: $activePage,
                     metrics: metrics,
-                    onLogTap: { activePage = .log },
+                    onLogTap: { navigate(to: .log) },
                     onSelectPage: navigate
                 )
                 .padding(.horizontal, metrics.horizontalPadding)
@@ -97,7 +102,9 @@ struct DashboardView: View {
             }
             LocalNotificationManager.shared.requestAuthorization()
             restorePersistedHealth()
+            restoreSettings()
             refreshStreakDays()
+            syncNotificationSchedules()
         }
         .onReceive(decayTimer) { _ in
             guard scenePhase == .active else { return }
@@ -106,14 +113,40 @@ struct DashboardView: View {
         .onChange(of: scenePhase) { _, newValue in
             if newValue == .active {
                 restorePersistedHealth()
+                restoreSettings()
             } else if newValue == .background || newValue == .inactive {
                 persistHealthState()
+                persistSettings()
                 syncLowHealthNotification()
             }
         }
         .onChange(of: health) { _, _ in
             persistHealthState()
             syncLowHealthNotification()
+        }
+        .onChange(of: contacts) { _, _ in
+            sanitizeContactsAfterMutation()
+            persistSettings()
+            syncNotificationSchedules()
+        }
+        .onChange(of: preferredContactID) { _, _ in
+            if selectedLogContactID == nil || !contacts.contains(where: { $0.id == selectedLogContactID }) {
+                selectedLogContactID = preferredContactID
+            }
+            persistSettings()
+            syncNotificationSchedules()
+        }
+        .onChange(of: notificationPreferences) { _, _ in
+            persistSettings()
+            syncNotificationSchedules()
+        }
+        .onChange(of: defaultCallMinutes) { _, _ in
+            defaultCallMinutes = min(max(defaultCallMinutes, 1), 240)
+            if logMinutes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                logMinutes = String(defaultCallMinutes)
+            }
+            persistSettings()
+            syncNotificationSchedules()
         }
     }
 
@@ -144,6 +177,11 @@ struct DashboardView: View {
         .scrollBounceBehavior(.basedOnSize)
     }
 
+    private var preferredContact: AppContact? {
+        guard let preferredContactID else { return contacts.first }
+        return contacts.first(where: { $0.id == preferredContactID }) ?? contacts.first
+    }
+
     private func logCall(name: String, minutes: Int) {
         applyElapsedDecay(now: Date())
         callsLogged += 1
@@ -153,16 +191,8 @@ struct DashboardView: View {
         let streakBonus = Double(streakTier * 2)
         let healingAmount = max(12, min(Double(minutes), 25)) + streakBonus
         health = min(health + healingAmount, 100)
-        notifications.insert(
-            InboxItem(
-                title: "Logged call with \(name)",
-                subtitle: "\(minutes) minute\(minutes == 1 ? "" : "s") logged. Current streak: \(streakDays) day\(streakDays == 1 ? "" : "s").",
-                kind: .streak
-            ),
-            at: 0
-        )
-        logName = ""
-        logMinutes = ""
+        selectedLogContactID = preferredContactID
+        logMinutes = String(defaultCallMinutes)
         lastHealthUpdatedAt = Date()
     }
 
@@ -191,6 +221,12 @@ struct DashboardView: View {
     }
 
     private func syncLowHealthNotification() {
+        guard notificationPreferences.lowHealthAlertsEnabled else {
+            wasBelowLowHealthThreshold = false
+            LocalNotificationManager.shared.clearLowHealthNotification()
+            return
+        }
+
         if health <= LocalNotificationManager.lowHealthThreshold {
             if !wasBelowLowHealthThreshold {
                 LocalNotificationManager.shared.scheduleLowHealthNotification(after: 1)
@@ -209,10 +245,23 @@ struct DashboardView: View {
             VStack(spacing: metrics.sectionSpacing) {
                 if page == .log {
                     LogPageCard(
-                        name: $logName,
+                        contacts: contacts,
+                        selectedContactID: $selectedLogContactID,
                         minutes: $logMinutes,
+                        defaultCallMinutes: defaultCallMinutes,
                         entries: callLogs,
-                        onSubmit: submitLogEntry
+                        onSubmit: submitLogEntry,
+                        onOpenSettings: { navigate(to: .settings) }
+                    )
+                } else if page == .settings {
+                    SettingsPageCard(
+                        contacts: contacts,
+                        preferredContactID: $preferredContactID,
+                        pendingContactName: $pendingContactName,
+                        notificationPreferences: $notificationPreferences,
+                        defaultCallMinutes: $defaultCallMinutes,
+                        onAddContact: addContact,
+                        onDeleteContact: deleteContact
                     )
                 } else {
                     DetailPageCard(
@@ -236,12 +285,16 @@ struct DashboardView: View {
     }
 
     private func submitLogEntry() {
-        let trimmedName = logName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty, let minutes = Int(logMinutes), minutes > 0 else {
+        guard
+            let selectedLogContactID,
+            let contact = contacts.first(where: { $0.id == selectedLogContactID }),
+            let minutes = Int(logMinutes),
+            minutes > 0
+        else {
             return
         }
 
-        logCall(name: trimmedName, minutes: minutes)
+        logCall(name: contact.name, minutes: minutes)
     }
 
     private func rotateSprite() {
@@ -257,6 +310,169 @@ struct DashboardView: View {
 
     private func refreshStreakDays() {
         streakDays = StreakCalculator.currentStreak(from: callLogs)
+    }
+
+    private func restoreSettings() {
+        let settings = SettingsPersistence.load()
+        contacts = settings.contacts
+        preferredContactID = settings.preferredContactID
+        defaultCallMinutes = settings.defaultCallMinutes
+        notificationPreferences = settings.notificationPreferences
+        selectedLogContactID = settings.preferredContactID ?? settings.contacts.first?.id
+
+        if logMinutes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            logMinutes = String(settings.defaultCallMinutes)
+        }
+    }
+
+    private func persistSettings() {
+        SettingsPersistence.save(
+            AppSettings(
+                contacts: contacts,
+                preferredContactID: preferredContactID,
+                defaultCallMinutes: defaultCallMinutes,
+                notificationPreferences: notificationPreferences
+            )
+        )
+    }
+
+    private func addContact() {
+        let trimmedName = pendingContactName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return }
+
+        let alreadyExists = contacts.contains { existing in
+            existing.name.compare(trimmedName, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }
+        guard !alreadyExists else {
+            pendingContactName = ""
+            return
+        }
+
+        let newContact = AppContact(name: trimmedName)
+        contacts.append(newContact)
+        preferredContactID = preferredContactID ?? newContact.id
+        selectedLogContactID = selectedLogContactID ?? newContact.id
+        pendingContactName = ""
+    }
+
+    private func deleteContact(_ contact: AppContact) {
+        contacts.removeAll { $0.id == contact.id }
+    }
+
+    private func sanitizeContactsAfterMutation() {
+        if contacts.isEmpty {
+            preferredContactID = nil
+            selectedLogContactID = nil
+            return
+        }
+
+        if !contacts.contains(where: { $0.id == preferredContactID }) {
+            preferredContactID = contacts.first?.id
+        }
+
+        if !contacts.contains(where: { $0.id == selectedLogContactID }) {
+            selectedLogContactID = preferredContactID ?? contacts.first?.id
+        }
+    }
+
+    private func syncNotificationSchedules() {
+        if notificationPreferences.dailyRemindersEnabled, let contact = preferredContact {
+            LocalNotificationManager.shared.scheduleDailyReminder(
+                hour: notificationPreferences.reminderHour,
+                contactName: contact.name,
+                minutes: defaultCallMinutes
+            )
+        } else {
+            LocalNotificationManager.shared.clearDailyReminderNotification()
+        }
+
+        syncLowHealthNotification()
+    }
+
+    private func buildNotifications() -> [InboxItem] {
+        var items: [InboxItem] = []
+        let focusName = preferredContact?.name ?? contacts.first?.name ?? "your favorite person"
+
+        if notificationPreferences.dailyRemindersEnabled {
+            items.append(
+                InboxItem(
+                    title: "Daily reminder set for \(formattedReminderHour)",
+                    subtitle: "Check in with \(focusName) for about \(defaultCallMinutes) minute\(defaultCallMinutes == 1 ? "" : "s").",
+                    kind: .reminder
+                )
+            )
+        }
+
+        if notificationPreferences.streakAlertsEnabled {
+            let streakTitle = streakDays > 0 ? "\(streakDays)-day streak active" : "Start a new streak today"
+            let streakSubtitle = streakDays > 0
+                ? "One more call keeps your streak with \(focusName) moving."
+                : "Log one call today to get momentum going."
+
+            items.append(InboxItem(title: streakTitle, subtitle: streakSubtitle, kind: .streak))
+        }
+
+        if notificationPreferences.messageAlertsEnabled, !contacts.isEmpty {
+            items.append(
+                InboxItem(
+                    title: "\(focusName) replied",
+                    subtitle: "Call me when you get a minute.",
+                    kind: .message
+                )
+            )
+        }
+
+        if notificationPreferences.weeklySummaryEnabled {
+            let weeklyStats = weeklySummary()
+            items.append(
+                InboxItem(
+                    title: "Weekly recap: \(weeklyStats.callCount) call\(weeklyStats.callCount == 1 ? "" : "s"), \(weeklyStats.totalMinutes) minutes",
+                    subtitle: weeklyStats.subtitle,
+                    kind: .summary
+                )
+            )
+        }
+
+        if notificationPreferences.lowHealthAlertsEnabled, health <= LocalNotificationManager.lowHealthThreshold {
+            items.append(
+                InboxItem(
+                    title: "Health is getting low",
+                    subtitle: "Log a call soon to recharge your Tamagotchi.",
+                    kind: .health
+                )
+            )
+        }
+
+        return items
+    }
+
+    private func weeklySummary(calendar: Calendar = .current) -> (callCount: Int, totalMinutes: Int, subtitle: String) {
+        guard let weekAgo = calendar.date(byAdding: .day, value: -6, to: Date()) else {
+            return (0, 0, "No calls logged this week yet.")
+        }
+
+        let recentLogs = callLogs.filter { $0.loggedAt >= weekAgo }
+        let totalMinutes = recentLogs.reduce(0) { $0 + $1.minutes }
+        let names = Array(Set(recentLogs.map(\.name))).sorted()
+        let subtitle: String
+
+        if recentLogs.isEmpty {
+            subtitle = "No calls logged this week yet."
+        } else {
+            let joinedNames = names.prefix(3).joined(separator: ", ")
+            subtitle = "Recent contacts: \(joinedNames)."
+        }
+
+        return (recentLogs.count, totalMinutes, subtitle)
+    }
+
+    private var formattedReminderHour: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "h a"
+
+        let components = DateComponents(hour: notificationPreferences.reminderHour)
+        let date = Calendar.current.date(from: components) ?? Date()
+        return formatter.string(from: date)
     }
 
     private func navigate(to page: HomePage) {
@@ -373,6 +589,7 @@ private struct HomeTopBar: View {
     let metrics: LayoutMetrics
     let isBackVisible: Bool
     let isQuickActionsExpanded: Bool
+    let hasNotifications: Bool
     let onTitleTap: () -> Void
     let onBack: () -> Void
     let onInbox: () -> Void
@@ -402,7 +619,7 @@ private struct HomeTopBar: View {
 
             Spacer()
 
-            CircularIconButton(systemName: "bell.badge.fill", diameter: metrics.topButtonSize, iconSize: metrics.topIconSize, showDot: true, action: onInbox)
+            CircularIconButton(systemName: "bell.badge.fill", diameter: metrics.topButtonSize, iconSize: metrics.topIconSize, showDot: hasNotifications, action: onInbox)
         }
     }
 }
@@ -913,13 +1130,16 @@ private struct DetailPageCard: View {
 }
 
 private struct LogPageCard: View {
-    @Binding var name: String
+    let contacts: [AppContact]
+    @Binding var selectedContactID: UUID?
     @Binding var minutes: String
+    let defaultCallMinutes: Int
     let entries: [CallLogEntry]
     let onSubmit: () -> Void
+    let onOpenSettings: () -> Void
 
     private var formIsValid: Bool {
-        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (Int(minutes) ?? 0) > 0
+        selectedContactID != nil && (Int(minutes) ?? 0) > 0
     }
 
     var body: some View {
@@ -932,27 +1152,36 @@ private struct LogPageCard: View {
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color(red: 0.31, green: 0.45, blue: 0.50))
 
-            VStack(alignment: .leading, spacing: 14) {
-                LogInputField(title: "Name", placeholder: "Mom", text: $name)
-                LogInputField(title: "Minutes", placeholder: "15", text: $minutes, isNumeric: true)
-
-                Button(action: onSubmit) {
-                    HStack {
-                        Image(systemName: "phone.badge.plus.fill")
-                            .font(.system(size: 15, weight: .bold))
-                        Text("Save Call")
-                            .font(.system(size: 16, weight: .black, design: .rounded))
-                    }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(formIsValid ? Color(red: 0.12, green: 0.76, blue: 0.60) : Color(red: 0.67, green: 0.78, blue: 0.77))
+            if contacts.isEmpty {
+                EmptyLogStateCard(onOpenSettings: onOpenSettings)
+            } else {
+                VStack(alignment: .leading, spacing: 14) {
+                    ContactPickerField(contacts: contacts, selectedContactID: $selectedContactID)
+                    LogInputField(
+                        title: "Minutes",
+                        placeholder: String(defaultCallMinutes),
+                        text: $minutes,
+                        isNumeric: true
                     )
+
+                    Button(action: onSubmit) {
+                        HStack {
+                            Image(systemName: "phone.badge.plus.fill")
+                                .font(.system(size: 15, weight: .bold))
+                            Text("Save Call")
+                                .font(.system(size: 16, weight: .black, design: .rounded))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(formIsValid ? Color(red: 0.12, green: 0.76, blue: 0.60) : Color(red: 0.67, green: 0.78, blue: 0.77))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!formIsValid)
                 }
-                .buttonStyle(.plain)
-                .disabled(!formIsValid)
             }
 
             VStack(alignment: .leading, spacing: 12) {
@@ -976,6 +1205,319 @@ private struct LogPageCard: View {
                 )
         )
         .shadow(color: Color.black.opacity(0.10), radius: 20, y: 10)
+    }
+}
+
+private struct EmptyLogStateCard: View {
+    let onOpenSettings: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Add contacts before logging calls.")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+
+            Text("Your log only tracks people from your contact list so the check-ins stay intentional.")
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(Color(red: 0.39, green: 0.49, blue: 0.54))
+
+            Button(action: onOpenSettings) {
+                Text("Open Settings")
+                    .font(.system(size: 14, weight: .black, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color(red: 0.44, green: 0.58, blue: 0.94))
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.72))
+        )
+    }
+}
+
+private struct ContactPickerField: View {
+    let contacts: [AppContact]
+    @Binding var selectedContactID: UUID?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Contact")
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+
+            Picker("Contact", selection: $selectedContactID) {
+                ForEach(contacts) { contact in
+                    Text(contact.name).tag(contact.id as UUID?)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 14)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.white.opacity(0.88))
+            )
+        }
+    }
+}
+
+private struct SettingsPageCard: View {
+    let contacts: [AppContact]
+    @Binding var preferredContactID: UUID?
+    @Binding var pendingContactName: String
+    @Binding var notificationPreferences: NotificationPreferences
+    @Binding var defaultCallMinutes: Int
+    let onAddContact: () -> Void
+    let onDeleteContact: (AppContact) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Settings")
+                .font(.system(size: 30, weight: .black, design: .rounded))
+                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+
+            Text("Manage the people you track, how the app reminds you, and a few defaults that shape the logging flow.")
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color(red: 0.31, green: 0.45, blue: 0.50))
+
+            VStack(alignment: .leading, spacing: 12) {
+                SettingsSectionTitle(title: "Contacts")
+
+                HStack(spacing: 10) {
+                    TextField("Add a contact", text: $pendingContactName)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(Color.white.opacity(0.88))
+                        )
+
+                    Button(action: onAddContact) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 15, weight: .black))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .background(
+                                Circle()
+                                    .fill(Color(red: 0.12, green: 0.76, blue: 0.60))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if contacts.isEmpty {
+                    SettingsHint(text: "Add at least one contact to enable the call log.")
+                } else {
+                    ForEach(contacts) { contact in
+                        ContactSettingsRow(
+                            contact: contact,
+                            isPreferred: preferredContactID == contact.id,
+                            onSetPreferred: { preferredContactID = contact.id },
+                            onDelete: { onDeleteContact(contact) }
+                        )
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                SettingsSectionTitle(title: "Logging Defaults")
+
+                Stepper(value: $defaultCallMinutes, in: 1...240) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Default call length: \(defaultCallMinutes) minute\(defaultCallMinutes == 1 ? "" : "s")")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+
+                        Text("New log entries start from this value so you can save faster.")
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundStyle(Color(red: 0.39, green: 0.49, blue: 0.54))
+                    }
+                }
+
+                if !contacts.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Default contact")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+
+                        Picker("Default contact", selection: $preferredContactID) {
+                            ForEach(contacts) { contact in
+                                Text(contact.name).tag(contact.id as UUID?)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 14)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(Color.white.opacity(0.88))
+                        )
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                SettingsSectionTitle(title: "Notifications")
+
+                SettingsToggleRow(
+                    title: "Daily reminders",
+                    subtitle: "Shows a reminder card in Inbox and schedules a local reminder.",
+                    isOn: $notificationPreferences.dailyRemindersEnabled
+                )
+
+                if notificationPreferences.dailyRemindersEnabled {
+                    Stepper(value: $notificationPreferences.reminderHour, in: 0...23) {
+                        Text("Reminder time: \(formattedHour(notificationPreferences.reminderHour))")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                    }
+                }
+
+                SettingsToggleRow(
+                    title: "Low health alerts",
+                    subtitle: "Adds a low-health warning to Inbox and controls system alerts.",
+                    isOn: $notificationPreferences.lowHealthAlertsEnabled
+                )
+                SettingsToggleRow(
+                    title: "Streak celebrations",
+                    subtitle: "Keeps streak updates visible in Inbox.",
+                    isOn: $notificationPreferences.streakAlertsEnabled
+                )
+                SettingsToggleRow(
+                    title: "Message updates",
+                    subtitle: "Shows friendly reply-style nudges from your default contact.",
+                    isOn: $notificationPreferences.messageAlertsEnabled
+                )
+                SettingsToggleRow(
+                    title: "Weekly recap",
+                    subtitle: "Surfaces your running weekly summary in Inbox.",
+                    isOn: $notificationPreferences.weeklySummaryEnabled
+                )
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 30, style: .continuous)
+                .fill(Color.white.opacity(0.78))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 30, style: .continuous)
+                        .stroke(Color.white.opacity(0.58), lineWidth: 1)
+                )
+        )
+        .shadow(color: Color.black.opacity(0.10), radius: 20, y: 10)
+    }
+
+    private func formattedHour(_ hour: Int) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "h a"
+        let date = Calendar.current.date(from: DateComponents(hour: hour)) ?? Date()
+        return formatter.string(from: date)
+    }
+}
+
+private struct SettingsSectionTitle: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 16, weight: .black, design: .rounded))
+            .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+    }
+}
+
+private struct SettingsHint: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 13, weight: .medium, design: .rounded))
+            .foregroundStyle(Color(red: 0.39, green: 0.49, blue: 0.54))
+            .padding(.vertical, 6)
+    }
+}
+
+private struct ContactSettingsRow: View {
+    let contact: AppContact
+    let isPreferred: Bool
+    let onSetPreferred: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onSetPreferred) {
+                HStack(spacing: 10) {
+                    Image(systemName: isPreferred ? "star.fill" : "star")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(isPreferred ? Color(red: 0.98, green: 0.76, blue: 0.29) : Color(red: 0.56, green: 0.64, blue: 0.72))
+
+                    Text(contact.name)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+
+                    Spacer(minLength: 0)
+
+                    if isPreferred {
+                        Text("Default")
+                            .font(.system(size: 12, weight: .black, design: .rounded))
+                            .foregroundStyle(Color(red: 0.98, green: 0.63, blue: 0.36))
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Color(red: 0.88, green: 0.37, blue: 0.42))
+                    .frame(width: 34, height: 34)
+                    .background(
+                        Circle()
+                            .fill(Color.white.opacity(0.76))
+                    )
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white.opacity(0.72))
+        )
+    }
+}
+
+private struct SettingsToggleRow: View {
+    let title: String
+    let subtitle: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle(isOn: $isOn) {
+                Text(title)
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+            }
+
+            Text(subtitle)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(Color(red: 0.39, green: 0.49, blue: 0.54))
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white.opacity(0.72))
+        )
     }
 }
 
@@ -1291,6 +1833,8 @@ private struct InboxItem: Identifiable {
         case reminder
         case streak
         case message
+        case summary
+        case health
 
         var color: Color {
             switch self {
@@ -1300,6 +1844,10 @@ private struct InboxItem: Identifiable {
                 return Color(red: 0.49, green: 0.93, blue: 0.72)
             case .message:
                 return Color(red: 1.0, green: 0.72, blue: 0.45)
+            case .summary:
+                return Color(red: 0.78, green: 0.69, blue: 0.98)
+            case .health:
+                return Color(red: 0.98, green: 0.48, blue: 0.52)
             }
         }
     }
