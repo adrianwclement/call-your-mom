@@ -12,6 +12,7 @@ struct DashboardView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var activePage: HomePage = .home
+    @State private var pageHistory: [HomePage] = []
     @State private var quickActionsExpanded = false
     @State private var health = HealthPersistence.defaultHealth
     @State private var callsLogged = HealthPersistence.defaultCallsLogged
@@ -24,6 +25,12 @@ struct DashboardView: View {
         CallLogEntry(name: "Mom", minutes: 18),
         CallLogEntry(name: "Dad", minutes: 9)
     ]
+    @State private var selectedSprite: SpriteProfile = .skyBuddy
+    @State private var selectedClothing: ClothingOption = .none
+    @State private var selectedDanceSpeed: DanceSpeed = .normal
+    @State private var streakTier: Int = 1
+    @State private var selectedTheme: AppTheme = .meadow
+    @State private var streakDays: Int = 3
     @State private var notifications: [InboxItem] = [
         InboxItem(title: "Daily reminder ready", subtitle: "Send a quick check-in before 8 PM.", kind: .reminder),
         InboxItem(title: "3-day streak active", subtitle: "One more call tomorrow keeps it going.", kind: .streak),
@@ -36,20 +43,20 @@ struct DashboardView: View {
             let metrics = LayoutMetrics(container: geometry.size, safeArea: geometry.safeAreaInsets)
 
             ZStack {
-                AppSceneBackground()
+                AppSceneBackground(theme: selectedTheme)
 
                 VStack(spacing: metrics.sectionSpacing) {
                     HomeTopBar(
                         metrics: metrics,
-                        showsBackButton: activePage != .home,
+                        isBackVisible: activePage != .home,
                         isQuickActionsExpanded: quickActionsExpanded,
                         onTitleTap: {
                             withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
                                 quickActionsExpanded.toggle()
                             }
                         },
-                        onBack: { activePage = .home },
-                        onInbox: { activePage = .inbox }
+                        onBack: goBack,
+                        onInbox: { navigate(to: .inbox) }
                     )
                     .padding(.top, metrics.topPadding)
                     .padding(.horizontal, metrics.horizontalPadding)
@@ -68,6 +75,8 @@ struct DashboardView: View {
                     activePage: $activePage,
                     metrics: metrics,
                     onLogTap: { activePage = .log }
+                    onLogCall: logCall,
+                    onSelectPage: navigate
                 )
                 .padding(.horizontal, metrics.horizontalPadding)
                 .padding(.top, 8)
@@ -119,7 +128,12 @@ struct DashboardView: View {
 
                 FloatingHealthBar(health: health, isAnimating: healthPulse)
 
-                IntegratedTamagotchiStage(health: health)
+                IntegratedTamagotchiStage(
+                    health: health,
+                    sprite: selectedSprite,
+                    clothing: selectedClothing,
+                    danceSpeed: selectedDanceSpeed
+                )
 
                 Spacer(minLength: 0)
             }
@@ -153,6 +167,17 @@ struct DashboardView: View {
         guard updatedHealth != health || lastHealthUpdatedAt != now else { return }
         health = updatedHealth
         lastHealthUpdatedAt = now
+        let streakBonus = Double(streakTier * 2)
+        health = min(health + 18 + streakBonus, 100)
+        streakDays += 1
+    }
+
+    private func decreaseHealth() {
+        let decay = max(1, 4 - streakTier)
+        health = max(health - Double(decay), 0)
+        if health < 18 {
+            streakDays = max(streakDays - 1, 0)
+        }
     }
 
     private func restorePersistedHealth() {
@@ -198,6 +223,17 @@ struct DashboardView: View {
                 } else {
                     DetailPageCard(page: page, items: notifications)
                 }
+                DetailPageCard(
+                    page: page,
+                    items: notifications,
+                    selectedSprite: $selectedSprite,
+                    selectedClothing: $selectedClothing,
+                    selectedDanceSpeed: $selectedDanceSpeed,
+                    streakTier: $streakTier,
+                    selectedTheme: $selectedTheme,
+                    streakDays: $streakDays,
+                    onRotateSprite: rotateSprite
+                )
             }
             .padding(.horizontal, metrics.horizontalPadding)
             .padding(.bottom, metrics.contentBottomPadding)
@@ -213,6 +249,31 @@ struct DashboardView: View {
         }
 
         logCall(name: trimmedName, minutes: minutes)
+    private func rotateSprite() {
+        let allSprites = SpriteProfile.allCases
+        guard let currentIndex = allSprites.firstIndex(of: selectedSprite) else {
+            selectedSprite = allSprites.first ?? .skyBuddy
+            return
+        }
+
+        let nextIndex = (currentIndex + 1) % allSprites.count
+        selectedSprite = allSprites[nextIndex]
+    }
+
+    private func navigate(to page: HomePage) {
+        guard page != activePage else { return }
+        pageHistory.append(activePage)
+        activePage = page
+    }
+
+    private func goBack() {
+        guard activePage != .home else { return }
+
+        if let previousPage = pageHistory.popLast() {
+            activePage = previousPage
+        } else {
+            activePage = .home
+        }
     }
 }
 
@@ -259,14 +320,12 @@ private struct LayoutMetrics {
 }
 
 private struct AppSceneBackground: View {
+    let theme: AppTheme
+
     var body: some View {
         ZStack(alignment: .bottom) {
             LinearGradient(
-                colors: [
-                    Color(red: 0.82, green: 0.92, blue: 1.0),
-                    Color(red: 0.78, green: 0.91, blue: 0.99),
-                    Color(red: 0.67, green: 0.89, blue: 0.89)
-                ],
+                colors: [theme.primary, theme.secondary, theme.tertiary],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -293,17 +352,17 @@ private struct AppSceneBackground: View {
 
             ZStack(alignment: .bottom) {
                 SmoothHill(heightFactor: 0.26, peak: 0.18, valley: 0.44)
-                    .fill(Color(red: 0.55, green: 0.77, blue: 0.97))
+                    .fill(theme.hillOne)
                     .frame(height: 250)
                     .offset(x: -120, y: 30)
 
                 SmoothHill(heightFactor: 0.24, peak: 0.78, valley: 0.48)
-                    .fill(Color(red: 0.62, green: 0.82, blue: 0.96))
+                    .fill(theme.hillTwo)
                     .frame(height: 230)
                     .offset(x: 130, y: 36)
 
                 SmoothHill(heightFactor: 0.36, peak: 0.50, valley: 0.72)
-                    .fill(Color(red: 0.24, green: 0.79, blue: 0.70))
+                    .fill(theme.hillThree)
                     .frame(height: 320)
                     .offset(y: 108)
             }
@@ -313,7 +372,7 @@ private struct AppSceneBackground: View {
 
 private struct HomeTopBar: View {
     let metrics: LayoutMetrics
-    let showsBackButton: Bool
+    let isBackVisible: Bool
     let isQuickActionsExpanded: Bool
     let onTitleTap: () -> Void
     let onBack: () -> Void
@@ -321,7 +380,7 @@ private struct HomeTopBar: View {
 
     var body: some View {
         HStack {
-            if showsBackButton {
+            if isBackVisible {
                 CircularIconButton(systemName: "arrow.left", diameter: metrics.topButtonSize, iconSize: metrics.topIconSize, showDot: false, action: onBack)
             } else {
                 Color.clear
@@ -439,11 +498,19 @@ private struct ExpandableActionRow: View {
 
 private struct IntegratedTamagotchiStage: View {
     let health: Double
+    let sprite: SpriteProfile
+    let clothing: ClothingOption
+    let danceSpeed: DanceSpeed
+    @State private var dancePhase = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            PlaceholderTamagotchi(health: health)
-                .offset(y: -10)
+            PixelTamagotchi(health: health, sprite: sprite, clothing: clothing)
+                .offset(y: dancePhase ? -18 : -6)
+                .animation(
+                    .easeInOut(duration: danceSpeed.duration).repeatForever(autoreverses: true),
+                    value: dancePhase
+                )
 
             Ellipse()
                 .fill(Color.black.opacity(0.10))
@@ -452,61 +519,57 @@ private struct IntegratedTamagotchiStage: View {
                 .offset(y: 28)
         }
         .frame(height: 300)
-        .overlay(alignment: .bottom) {
-            Text("Logging a call restores health.")
-                .font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.86))
-                .padding(.bottom, 10)
+        .onAppear {
+            dancePhase = true
+        }
+        .onChange(of: danceSpeed) {
+            dancePhase = false
+            withAnimation(.easeInOut(duration: danceSpeed.duration).repeatForever(autoreverses: true)) {
+                dancePhase = true
+            }
         }
     }
 }
 
-private struct PlaceholderTamagotchi: View {
+private struct PixelTamagotchi: View {
     let health: Double
+    let sprite: SpriteProfile
+    let clothing: ClothingOption
 
     var body: some View {
         VStack(spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 34, style: .continuous)
-                    .fill(shellColor)
-                    .frame(width: 120, height: 120)
+            ZStack(alignment: .topTrailing) {
+                PixelCharacterGrid(
+                    pixels: pixelRows,
+                    palette: pixelPalette
+                )
+                .frame(width: 150, height: 150)
+                .drawingGroup()
 
-                Circle()
-                    .fill(Color.white.opacity(0.90))
-                    .frame(width: 52, height: 52)
-
-                Circle()
-                    .fill(Color(red: 0.16, green: 0.24, blue: 0.34))
-                    .frame(width: 22, height: 22)
-
-                Capsule()
-                    .fill(mouthColor)
-                    .frame(width: 30, height: 10)
-                    .offset(y: 28)
-
-                Circle()
-                    .stroke(Color.white.opacity(0.18), lineWidth: 16)
-                    .frame(width: 154, height: 154)
+                Image(systemName: sprite.badgeSymbol)
+                    .font(.system(size: 16, weight: .black))
+                    .foregroundStyle(sprite.badgeColor)
+                    .offset(x: -8, y: 6)
             }
 
             Text(healthLabel)
                 .font(.system(size: 15, weight: .black, design: .rounded))
                 .foregroundStyle(Color.white.opacity(0.92))
+
+            Text(sprite.displayName)
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(Color.white.opacity(0.86))
         }
     }
 
     private var shellColor: Color {
         if health > 70 {
-            return Color(red: 0.45, green: 0.73, blue: 0.98)
+            return sprite.highHealthShellColor
         } else if health > 35 {
-            return Color(red: 0.61, green: 0.70, blue: 0.92)
+            return sprite.midHealthShellColor
         } else {
-            return Color(red: 0.73, green: 0.62, blue: 0.84)
+            return sprite.lowHealthShellColor
         }
-    }
-
-    private var mouthColor: Color {
-        health > 35 ? Color(red: 0.93, green: 0.44, blue: 0.48) : Color(red: 0.64, green: 0.45, blue: 0.55)
     }
 
     private var healthLabel: String {
@@ -518,11 +581,139 @@ private struct PlaceholderTamagotchi: View {
             return "Running low"
         }
     }
+
+    private var mouthCharacter: Character {
+        health > 35 ? "M" : "S"
+    }
+
+    private var pixelRows: [String] {
+        var rows = [
+            "................",
+            "......BBBB......",
+            "....BBBBBBBB....",
+            "...BBBBBBBBBB...",
+            "..BBBBBBBBBBBB..",
+            "..BBBBBBBBBBBB..",
+            "..BBBBBBBBBBBB..",
+            "..BBBBEEBBEEBB..",
+            "..BBBBBBBBBBBB..",
+            "...BBBBMMBBBB...",
+            "....BBBBBBBB....",
+            "....BBBBBBBB....",
+            "....BBBBBBBB....",
+            ".....BBBBBB.....",
+            "......BBBB......",
+            "................"
+        ]
+
+        switch sprite {
+        case .skyBuddy:
+            rows[1] = ".....BBBBBB....."
+//            rows[6] = mouthCharacter == "S" ? "..BBBBAABBAAAB.." : "..BBBBAABBAABB.."
+        case .peachPal:
+            rows[4] = "..BBBBBBBBBBBB.."
+            rows[7] = "..BBBBEBBBEBBB.."
+//            rows[6] = mouthCharacter == "S" ? "..BBBFFFBBBFFB.." : "..BBBFFBBBBFFB.."
+        case .mintBean:
+            if clothing == .topHat || clothing == .crown || clothing == .propellerHat {
+                rows[1] = ".....BBLLBB....."
+                rows[2] = "...BBBLLLLBBB..."
+            }
+//            rows[6] = mouthCharacter == "S" ? "..BBCCBBBCCCBB.." : "..BBCCBBBBCCBB.."
+        }
+
+        if mouthCharacter == "S" {
+            rows[9] = "...BBBBSSBBBB..."
+        }
+
+        switch clothing {
+        case .none:
+            break
+        case .propellerHat:
+            rows[0] = "......GGGG......"
+            rows[1] = "....VVVGXGVVV..."
+            rows[2] = "......GGGG......"
+            rows[3] = ".....BBBBBB....."
+        case .topHat:
+            rows[0] = ".....UUUUUU....."
+            rows[1] = ".....UUUUUU....."
+            rows[2] = "....UUURRRUU...."
+            rows[3] = "...UUUUUUUUUU..."
+        case .crown:
+            rows[0] = ".....Y.YY.Y....."
+            rows[1] = ".....YYYYYY....."
+            rows[2] = "....YYOOOOYY...."
+            rows[3] = "....YYYYYYYY...."
+        }
+
+        return rows
+    }
+
+    private var pixelPalette: [Character: Color] {
+        [
+            ".": .clear,
+            "B": shellColor,
+            "E": Color(red: 0.16, green: 0.24, blue: 0.34),
+            "M": Color(red: 0.93, green: 0.44, blue: 0.48),
+            "S": Color(red: 0.63, green: 0.45, blue: 0.54),
+            "L": Color.white.opacity(0.45),
+            "A": Color(red: 0.12, green: 0.30, blue: 0.47),
+            "C": Color(red: 0.20, green: 0.46, blue: 0.34),
+            "F": Color(red: 0.44, green: 0.20, blue: 0.29),
+            "G": clothing == .propellerHat ? clothing.color : Color(red: 0.24, green: 0.74, blue: 0.66),
+            "V": Color(red: 0.94, green: 0.34, blue: 0.40),
+            "X": Color(red: 0.99, green: 0.84, blue: 0.36),
+            "U": Color(red: 0.13, green: 0.14, blue: 0.18),
+            "R": clothing == .topHat ? clothing.color : Color(red: 0.22, green: 0.48, blue: 0.88),
+            "Y": Color(red: 0.98, green: 0.76, blue: 0.29),
+            "O": Color(red: 0.95, green: 0.45, blue: 0.38)
+        ]
+    }
+}
+
+private struct PixelCharacterGrid: View {
+    let pixels: [String]
+    let palette: [Character: Color]
+
+    var body: some View {
+        GeometryReader { geometry in
+            let columns = max(pixels.first?.count ?? 1, 1)
+            let rows = max(pixels.count, 1)
+            let pixelSize = min(geometry.size.width / CGFloat(columns), geometry.size.height / CGFloat(rows))
+            let artWidth = pixelSize * CGFloat(columns)
+            let artHeight = pixelSize * CGFloat(rows)
+            let xOrigin = (geometry.size.width - artWidth) / 2
+            let yOrigin = (geometry.size.height - artHeight) / 2
+
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(pixels.enumerated()), id: \.offset) { rowIndex, row in
+                    ForEach(Array(row.enumerated()), id: \.offset) { colIndex, char in
+                        if char != ".", let color = palette[char] {
+                            Rectangle()
+                                .fill(color)
+                                .frame(width: pixelSize, height: pixelSize)
+                                .position(
+                                    x: xOrigin + CGFloat(colIndex) * pixelSize + (pixelSize / 2),
+                                    y: yOrigin + CGFloat(rowIndex) * pixelSize + (pixelSize / 2)
+                                )
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 private struct DetailPageCard: View {
     let page: HomePage
     let items: [InboxItem]
+    @Binding var selectedSprite: SpriteProfile
+    @Binding var selectedClothing: ClothingOption
+    @Binding var selectedDanceSpeed: DanceSpeed
+    @Binding var streakTier: Int
+    @Binding var selectedTheme: AppTheme
+    @Binding var streakDays: Int
+    let onRotateSprite: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -540,6 +731,8 @@ private struct DetailPageCard: View {
                         InboxRow(item: item)
                     }
                 }
+            } else if page == .upgrades {
+                upgradesSection
             } else {
                 VStack(alignment: .leading, spacing: 10) {
                     DetailBullet(text: page.primaryLine)
@@ -559,6 +752,164 @@ private struct DetailPageCard: View {
                 )
         )
         .shadow(color: Color.black.opacity(0.10), radius: 20, y: 10)
+    }
+
+    private var upgradesSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Sprite")
+                .font(.system(size: 14, weight: .black, design: .rounded))
+                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+
+            Text("Active sprite: \(selectedSprite.displayName)")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+
+            Button(action: onRotateSprite) {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 14, weight: .bold))
+                    Text("Rotate Sprite")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(selectedSprite.highlightColor)
+                )
+            }
+            .buttonStyle(.plain)
+
+            ForEach(SpriteProfile.allCases) { sprite in
+                Button(action: { selectedSprite = sprite }) {
+                    HStack(spacing: 10) {
+                        Circle()
+                            .fill(sprite.highlightColor)
+                            .frame(width: 14, height: 14)
+
+                        Text(sprite.displayName)
+                            .font(.system(size: 15, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+
+                        Spacer()
+
+                        if sprite == selectedSprite {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(sprite.highlightColor)
+                        }
+                    }
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.white.opacity(0.70))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text("Clothing")
+                .font(.system(size: 14, weight: .black, design: .rounded))
+                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                ForEach(ClothingOption.allCases) { clothing in
+                    Button(action: { selectedClothing = clothing }) {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(clothing.color)
+                                .frame(width: 12, height: 12)
+                            Text(clothing.displayName)
+                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(selectedClothing == clothing ? clothing.color.opacity(0.25) : Color.white.opacity(0.70))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Text("Dance Speed")
+                .font(.system(size: 14, weight: .black, design: .rounded))
+                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+
+            HStack(spacing: 8) {
+                ForEach(DanceSpeed.allCases) { speed in
+                    Button(action: { selectedDanceSpeed = speed }) {
+                        Text(speed.displayName)
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundStyle(selectedDanceSpeed == speed ? .white : Color(red: 0.10, green: 0.17, blue: 0.27))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(selectedDanceSpeed == speed ? selectedSprite.highlightColor : Color.white.opacity(0.72))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Text("Streak")
+                .font(.system(size: 14, weight: .black, design: .rounded))
+                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+
+            Stepper(value: $streakTier, in: 1...3) {
+                Text("Streak Boost Tier \(streakTier)")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+            }
+
+            Text("Current streak: \(streakDays) days")
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color(red: 0.21, green: 0.33, blue: 0.40))
+
+            Text("Effect: +\(streakTier * 2) health per call, decay drops to \(max(1, 4 - streakTier)).")
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(Color(red: 0.35, green: 0.47, blue: 0.52))
+
+            Text("Themes")
+                .font(.system(size: 14, weight: .black, design: .rounded))
+                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+
+            ForEach(AppTheme.allCases) { theme in
+                Button(action: { selectedTheme = theme }) {
+                    HStack(spacing: 10) {
+                        HStack(spacing: 4) {
+                            Circle().fill(theme.primary).frame(width: 10, height: 10)
+                            Circle().fill(theme.secondary).frame(width: 10, height: 10)
+                            Circle().fill(theme.tertiary).frame(width: 10, height: 10)
+                        }
+
+                        Text(theme.displayName)
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+
+                        Spacer()
+
+                        if selectedTheme == theme {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(theme.primary)
+                        }
+                    }
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.white.opacity(0.70))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 }
 
@@ -740,6 +1091,8 @@ private struct ActionDock: View {
     @Binding var activePage: HomePage
     let metrics: LayoutMetrics
     let onLogTap: () -> Void
+    let onLogCall: () -> Void
+    let onSelectPage: (HomePage) -> Void
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 10) {
@@ -752,7 +1105,7 @@ private struct ActionDock: View {
                         if page == .log {
                             onLogTap()
                         } else {
-                            activePage = page
+                            onSelectPage(page)
                         }
                     }
                 )
@@ -845,15 +1198,15 @@ private struct SoftClouds: View {
         ZStack {
             Cloud()
                 .frame(width: 132, height: 48)
-                .offset(x: -18, y: -260)
+                .offset(x: -18, y: -320)
 
             Cloud()
                 .frame(width: 112, height: 42)
-                .offset(x: 126, y: -188)
+                .offset(x: 126, y: -248)
 
             Cloud()
                 .frame(width: 94, height: 34)
-                .offset(x: -140, y: -128)
+                .offset(x: -140, y: -188)
         }
         .foregroundStyle(Color.white.opacity(0.55))
     }
@@ -963,25 +1316,258 @@ private struct CallLogEntry: Identifiable {
     let id = UUID()
     let name: String
     let minutes: Int
+private enum ClothingOption: String, CaseIterable, Identifiable {
+    case none
+    case propellerHat
+    case topHat
+    case crown
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .none:
+            return "None"
+        case .propellerHat:
+            return "Propeller Hat"
+        case .topHat:
+            return "Top Hat"
+        case .crown:
+            return "Crown"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .none:
+            return Color(red: 0.75, green: 0.78, blue: 0.84)
+        case .propellerHat:
+            return Color(red: 0.24, green: 0.74, blue: 0.66)
+        case .topHat:
+            return Color(red: 0.22, green: 0.48, blue: 0.88)
+        case .crown:
+            return Color(red: 0.98, green: 0.76, blue: 0.29)
+        }
+    }
+}
+
+private enum DanceSpeed: String, CaseIterable, Identifiable {
+    case chill
+    case normal
+    case turbo
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .chill:
+            return "Chill"
+        case .normal:
+            return "Normal"
+        case .turbo:
+            return "Turbo"
+        }
+    }
+
+    var duration: Double {
+        switch self {
+        case .chill:
+            return 0.95
+        case .normal:
+            return 0.55
+        case .turbo:
+            return 0.28
+        }
+    }
+}
+
+private enum AppTheme: String, CaseIterable, Identifiable {
+    case meadow
+    case sunset
+    case moonlight
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .meadow:
+            return "Meadow"
+        case .sunset:
+            return "Sunset"
+        case .moonlight:
+            return "Moonlight"
+        }
+    }
+
+    var primary: Color {
+        switch self {
+        case .meadow:
+            return Color(red: 0.82, green: 0.92, blue: 1.0)
+        case .sunset:
+            return Color(red: 0.99, green: 0.79, blue: 0.70)
+        case .moonlight:
+            return Color(red: 0.60, green: 0.72, blue: 0.92)
+        }
+    }
+
+    var secondary: Color {
+        switch self {
+        case .meadow:
+            return Color(red: 0.78, green: 0.91, blue: 0.99)
+        case .sunset:
+            return Color(red: 0.98, green: 0.70, blue: 0.67)
+        case .moonlight:
+            return Color(red: 0.48, green: 0.61, blue: 0.83)
+        }
+    }
+
+    var tertiary: Color {
+        switch self {
+        case .meadow:
+            return Color(red: 0.67, green: 0.89, blue: 0.89)
+        case .sunset:
+            return Color(red: 0.95, green: 0.58, blue: 0.62)
+        case .moonlight:
+            return Color(red: 0.33, green: 0.47, blue: 0.72)
+        }
+    }
+
+    var hillOne: Color {
+        switch self {
+        case .meadow:
+            return Color(red: 0.55, green: 0.77, blue: 0.97)
+        case .sunset:
+            return Color(red: 0.96, green: 0.60, blue: 0.53)
+        case .moonlight:
+            return Color(red: 0.39, green: 0.57, blue: 0.84)
+        }
+    }
+
+    var hillTwo: Color {
+        switch self {
+        case .meadow:
+            return Color(red: 0.62, green: 0.82, blue: 0.96)
+        case .sunset:
+            return Color(red: 0.92, green: 0.52, blue: 0.48)
+        case .moonlight:
+            return Color(red: 0.31, green: 0.49, blue: 0.76)
+        }
+    }
+
+    var hillThree: Color {
+        switch self {
+        case .meadow:
+            return Color(red: 0.24, green: 0.79, blue: 0.70)
+        case .sunset:
+            return Color(red: 0.86, green: 0.40, blue: 0.40)
+        case .moonlight:
+            return Color(red: 0.24, green: 0.40, blue: 0.61)
+        }
+    }
+}
+
+private enum SpriteProfile: String, CaseIterable, Identifiable {
+    case skyBuddy
+    case peachPal
+    case mintBean
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .skyBuddy:
+            return "Sky Buddy"
+        case .peachPal:
+            return "Peach Pal"
+        case .mintBean:
+            return "Mint Bean"
+        }
+    }
+
+    var badgeSymbol: String {
+        switch self {
+        case .skyBuddy:
+            return "cloud.fill"
+        case .peachPal:
+            return "sparkles"
+        case .mintBean:
+            return "leaf.fill"
+        }
+    }
+
+    var badgeColor: Color {
+        switch self {
+        case .skyBuddy:
+            return Color(red: 0.73, green: 0.92, blue: 1.0)
+        case .peachPal:
+            return Color(red: 1.0, green: 0.90, blue: 0.58)
+        case .mintBean:
+            return Color(red: 0.72, green: 1.0, blue: 0.85)
+        }
+    }
+
+    var highlightColor: Color {
+        switch self {
+        case .skyBuddy:
+            return Color(red: 0.33, green: 0.65, blue: 0.98)
+        case .peachPal:
+            return Color(red: 0.98, green: 0.63, blue: 0.36)
+        case .mintBean:
+            return Color(red: 0.12, green: 0.76, blue: 0.60)
+        }
+    }
+
+    var highHealthShellColor: Color {
+        switch self {
+        case .skyBuddy:
+            return Color(red: 0.45, green: 0.73, blue: 0.98)
+        case .peachPal:
+            return Color(red: 0.98, green: 0.65, blue: 0.54)
+        case .mintBean:
+            return Color(red: 0.39, green: 0.82, blue: 0.68)
+        }
+    }
+
+    var midHealthShellColor: Color {
+        switch self {
+        case .skyBuddy:
+            return Color(red: 0.61, green: 0.70, blue: 0.92)
+        case .peachPal:
+            return Color(red: 0.93, green: 0.70, blue: 0.63)
+        case .mintBean:
+            return Color(red: 0.56, green: 0.75, blue: 0.66)
+        }
+    }
+
+    var lowHealthShellColor: Color {
+        switch self {
+        case .skyBuddy:
+            return Color(red: 0.73, green: 0.62, blue: 0.84)
+        case .peachPal:
+            return Color(red: 0.81, green: 0.58, blue: 0.72)
+        case .mintBean:
+            return Color(red: 0.52, green: 0.63, blue: 0.64)
+        }
+    }
 }
 
 private enum HomePage: CaseIterable {
     case home
-    case shop
+    case upgrades
     case settings
     case log
     case inbox
 
     static var dockCases: [HomePage] {
-        [.home, .shop, .settings, .log]
+        [.home, .upgrades, .settings, .log]
     }
 
     var title: String {
         switch self {
         case .home:
             return "Home"
-        case .shop:
-            return "Shop"
+        case .upgrades:
+            return "Upgrades"
         case .settings:
             return "Settings"
         case .log:
@@ -995,8 +1581,8 @@ private enum HomePage: CaseIterable {
         switch self {
         case .home:
             return ""
-        case .shop:
-            return "Storefront for future sprite items, themes, and boosts."
+        case .upgrades:
+            return "Customize your sprite with clothing, dance speed, streak boosts, and themes."
         case .settings:
             return "Preferences for reminders, contacts, and appearance."
         case .log:
@@ -1010,8 +1596,8 @@ private enum HomePage: CaseIterable {
         switch self {
         case .home:
             return ""
-        case .shop:
-            return "Featured bundles can live here."
+        case .upgrades:
+            return "Swap between cute pixel companions."
         case .settings:
             return "Notification preferences belong here."
         case .log:
@@ -1025,8 +1611,8 @@ private enum HomePage: CaseIterable {
         switch self {
         case .home:
             return ""
-        case .shop:
-            return "Unlockables and cosmetics can stack below."
+        case .upgrades:
+            return "Tune style and speed to match your vibe."
         case .settings:
             return "Contact defaults and quiet hours can fit here."
         case .log:
@@ -1040,8 +1626,8 @@ private enum HomePage: CaseIterable {
         switch self {
         case .home:
             return ""
-        case .shop:
-            return "This keeps the home screen focused on the character."
+        case .upgrades:
+            return "Boost streak health bonuses while customizing your world."
         case .settings:
             return "Keeping it off home leaves more room for the sprite."
         case .log:
@@ -1055,8 +1641,8 @@ private enum HomePage: CaseIterable {
         switch self {
         case .home:
             return "Home"
-        case .shop:
-            return "Shop"
+        case .upgrades:
+            return "Upgrades"
         case .settings:
             return "Settings"
         case .log:
@@ -1070,7 +1656,7 @@ private enum HomePage: CaseIterable {
         switch self {
         case .home:
             return "house.fill"
-        case .shop:
+        case .upgrades:
             return "bag.fill"
         case .settings:
             return "gearshape.fill"
@@ -1085,7 +1671,7 @@ private enum HomePage: CaseIterable {
         switch self {
         case .home:
             return Color(red: 0.33, green: 0.65, blue: 0.98)
-        case .shop:
+        case .upgrades:
             return Color(red: 0.98, green: 0.63, blue: 0.36)
         case .settings:
             return Color(red: 0.44, green: 0.58, blue: 0.94)
