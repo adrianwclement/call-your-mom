@@ -6,18 +6,24 @@
 //
 
 import SwiftUI
+internal import Combine
 
 struct DashboardView: View {
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var activePage: HomePage = .home
     @State private var quickActionsExpanded = false
-    @State private var health: Double = 68
-    @State private var callsLogged: Int = 1
+    @State private var health = HealthPersistence.defaultHealth
+    @State private var callsLogged = HealthPersistence.defaultCallsLogged
     @State private var healthPulse = false
+    @State private var lastHealthUpdatedAt = Date()
+    @State private var wasBelowLowHealthThreshold = false
     @State private var notifications: [InboxItem] = [
         InboxItem(title: "Daily reminder ready", subtitle: "Send a quick check-in before 8 PM.", kind: .reminder),
         InboxItem(title: "3-day streak active", subtitle: "One more call tomorrow keeps it going.", kind: .streak),
         InboxItem(title: "Mom replied", subtitle: "Call me when you get a minute.", kind: .message)
     ]
+    private let decayTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         GeometryReader { geometry in
@@ -29,6 +35,7 @@ struct DashboardView: View {
                 VStack(spacing: metrics.sectionSpacing) {
                     HomeTopBar(
                         metrics: metrics,
+                        showsBackButton: activePage != .home,
                         isQuickActionsExpanded: quickActionsExpanded,
                         onTitleTap: {
                             withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
@@ -74,7 +81,24 @@ struct DashboardView: View {
             withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
                 healthPulse = true
             }
-            startHealthDecay()
+            LocalNotificationManager.shared.requestAuthorization()
+            restorePersistedHealth()
+        }
+        .onReceive(decayTimer) { _ in
+            guard scenePhase == .active else { return }
+            applyElapsedDecay(now: Date())
+        }
+        .onChange(of: scenePhase) { _, newValue in
+            if newValue == .active {
+                restorePersistedHealth()
+            } else if newValue == .background || newValue == .inactive {
+                persistHealthState()
+                syncLowHealthNotification()
+            }
+        }
+        .onChange(of: health) { _, _ in
+            persistHealthState()
+            syncLowHealthNotification()
         }
     }
 
@@ -101,17 +125,45 @@ struct DashboardView: View {
     }
 
     private func logCall() {
+        applyElapsedDecay(now: Date())
         callsLogged += 1
         health = min(health + 22, 100)
+        lastHealthUpdatedAt = Date()
     }
 
-    private func decreaseHealth() {
-        health = max(health - 3, 0)
+    private func applyElapsedDecay(now: Date) {
+        let updatedHealth = HealthPersistence.decayedHealth(from: health, since: lastHealthUpdatedAt, now: now)
+        guard updatedHealth != health || lastHealthUpdatedAt != now else { return }
+        health = updatedHealth
+        lastHealthUpdatedAt = now
     }
 
-    private func startHealthDecay() {
-        Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { _ in
-            decreaseHealth()
+    private func restorePersistedHealth() {
+        let persisted = HealthPersistence.load()
+        callsLogged = persisted.callsLogged
+        health = HealthPersistence.decayedHealth(from: persisted.health, since: persisted.updatedAt, now: Date())
+        lastHealthUpdatedAt = Date()
+        wasBelowLowHealthThreshold = health <= LocalNotificationManager.lowHealthThreshold
+    }
+
+    private func persistHealthState() {
+        HealthPersistence.save(
+            health: health,
+            updatedAt: lastHealthUpdatedAt,
+            callsLogged: callsLogged
+        )
+    }
+
+    private func syncLowHealthNotification() {
+        if health <= LocalNotificationManager.lowHealthThreshold {
+            if !wasBelowLowHealthThreshold {
+                LocalNotificationManager.shared.scheduleLowHealthNotification(after: 1)
+                wasBelowLowHealthThreshold = true
+            }
+        } else {
+            wasBelowLowHealthThreshold = false
+            let timeUntilThreshold = (health - LocalNotificationManager.lowHealthThreshold) / HealthPersistence.decayPerSecond
+            LocalNotificationManager.shared.scheduleLowHealthNotification(after: timeUntilThreshold)
         }
     }
 
@@ -226,6 +278,7 @@ private struct AppSceneBackground: View {
 
 private struct HomeTopBar: View {
     let metrics: LayoutMetrics
+    let showsBackButton: Bool
     let isQuickActionsExpanded: Bool
     let onTitleTap: () -> Void
     let onBack: () -> Void
@@ -233,7 +286,12 @@ private struct HomeTopBar: View {
 
     var body: some View {
         HStack {
-            CircularIconButton(systemName: "arrow.left", diameter: metrics.topButtonSize, iconSize: metrics.topIconSize, showDot: false, action: onBack)
+            if showsBackButton {
+                CircularIconButton(systemName: "arrow.left", diameter: metrics.topButtonSize, iconSize: metrics.topIconSize, showDot: false, action: onBack)
+            } else {
+                Color.clear
+                    .frame(width: metrics.topButtonSize, height: metrics.topButtonSize)
+            }
 
             Spacer()
 
