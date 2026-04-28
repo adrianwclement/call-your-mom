@@ -7,6 +7,7 @@
 - `call-your-mom/call-your-mom.xcodeproj`: Xcode project
 - `call-your-mom/call-your-mom/`: App source files
 - `call-your-mom/call-your-mom/Assets.xcassets/`: App icons and Tamagotchi image assets
+- `call-your-mom/call-your-mom/.atlas/`: Sprite atlas registry and Tamagotchi manifests
 
 ## Prerequisites
 
@@ -72,6 +73,16 @@ The app starts in `call-your-mom/call_your_momApp.swift`, which loads `MainTabVi
 - `call-your-mom/ContactsView.swift`: Contacts tab placeholder
 - `call-your-mom/HistoryView.swift`: History tab placeholder
 - `call-your-mom/AccountView.swift`: Account tab placeholder
+
+### Adding New Tamagotchis
+
+The dashboard now supports loading additional playable Tamagotchis from `.atlas` manifests.
+
+1. Add your sprite sheet to `call-your-mom/call-your-mom/Assets.xcassets`.
+2. Create a new manifest in `call-your-mom/call-your-mom/.atlas/` (copy `manifest.template.json`).
+3. Define `atlas.idleAnimation` frames and `fps` in the manifest.
+4. Register that manifest name in `call-your-mom/call-your-mom/.atlas/registry.json`.
+5. Launch the app; the new Tamagotchi appears in the Sprite section automatically.
 
 ### Typical Development Workflow
 

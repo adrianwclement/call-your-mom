@@ -30,7 +30,8 @@ struct DashboardView: View {
         CallLogEntry(name: "Mom", minutes: 18, loggedAt: Date()),
         CallLogEntry(name: "Dad", minutes: 9, loggedAt: Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date())
     ]
-    @State private var selectedSprite: SpriteProfile = .skyBuddy
+    @State private var availableSprites: [TamagotchiSpriteProfile] = TamagotchiSpriteCatalog.load()
+    @State private var selectedSprite: TamagotchiSpriteProfile = TamagotchiSpriteCatalog.defaultSprite
     @State private var selectedClothing: ClothingOption = .none
     @State private var selectedDanceSpeed: DanceSpeed = .normal
     @State private var streakTier: Int = 1
@@ -139,6 +140,7 @@ struct DashboardView: View {
             withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
                 healthPulse = true
             }
+            reloadSpriteCatalog()
             LocalNotificationManager.shared.requestAuthorization()
             restorePersistedHealth()
             restoreSettings()
@@ -151,6 +153,7 @@ struct DashboardView: View {
         }
         .onChange(of: scenePhase) { _, newValue in
             if newValue == .active {
+                reloadSpriteCatalog()
                 restorePersistedHealth()
                 restoreSettings()
             } else if newValue == .background || newValue == .inactive {
@@ -309,6 +312,7 @@ struct DashboardView: View {
                     DetailPageCard(
                         page: page,
                         items: notifications,
+                        availableSprites: availableSprites,
                         selectedSprite: $selectedSprite,
                         selectedClothing: $selectedClothing,
                         selectedDanceSpeed: $selectedDanceSpeed,
@@ -340,14 +344,27 @@ struct DashboardView: View {
     }
 
     private func rotateSprite() {
-        let allSprites = SpriteProfile.allCases
+        let allSprites = availableSprites
+        guard !allSprites.isEmpty else { return }
         guard let currentIndex = allSprites.firstIndex(of: selectedSprite) else {
-            selectedSprite = allSprites.first ?? .skyBuddy
+            selectedSprite = allSprites.first ?? TamagotchiSpriteCatalog.defaultSprite
             return
         }
 
         let nextIndex = (currentIndex + 1) % allSprites.count
         selectedSprite = allSprites[nextIndex]
+    }
+
+    private func reloadSpriteCatalog() {
+        let loadedSprites = TamagotchiSpriteCatalog.load()
+        guard !loadedSprites.isEmpty else { return }
+        availableSprites = loadedSprites
+
+        if let existing = loadedSprites.first(where: { $0.id == selectedSprite.id }) {
+            selectedSprite = existing
+        } else if let first = loadedSprites.first {
+            selectedSprite = first
+        }
     }
 
     private func refreshStreakDays() {
@@ -787,7 +804,7 @@ private struct ExpandableActionRow: View {
 
 private struct IntegratedTamagotchiStage: View {
     let health: Double
-    let sprite: SpriteProfile
+    let sprite: TamagotchiSpriteProfile
     let clothing: ClothingOption
     let danceSpeed: DanceSpeed
     let isGameMode: Bool
@@ -860,7 +877,7 @@ private struct IntegratedTamagotchiStage: View {
 
 private struct PixelTamagotchi: View {
     let health: Double
-    let sprite: SpriteProfile
+    let sprite: TamagotchiSpriteProfile
     let clothing: ClothingOption
     var artSize: CGFloat = 150
     var showsLabels: Bool = true
@@ -869,12 +886,20 @@ private struct PixelTamagotchi: View {
     var body: some View {
         VStack(spacing: showsLabels ? 10 : 0) {
             ZStack(alignment: .topTrailing) {
-                PixelCharacterGrid(
-                    pixels: pixelRows,
-                    palette: pixelPalette
-                )
-                .frame(width: artSize, height: artSize)
-                .drawingGroup()
+                if let atlas = sprite.atlas {
+                    TimelineView(.animation(minimumInterval: atlas.idleAnimation.frameInterval, paused: false)) { context in
+                        if let atlasSpriteImage = atlasSpriteImage(at: context.date, atlas: atlas) {
+                            atlasSpriteImage
+                                .resizable()
+                                .interpolation(.none)
+                                .frame(width: artSize, height: artSize)
+                        } else {
+                            fallbackPixelSprite
+                        }
+                    }
+                } else {
+                    fallbackPixelSprite
+                }
 
                 if showsBadge {
                     Image(systemName: sprite.badgeSymbol)
@@ -920,6 +945,32 @@ private struct PixelTamagotchi: View {
         health > 35 ? "M" : "S"
     }
 
+    private var fallbackPixelSprite: some View {
+        PixelCharacterGrid(
+            pixels: pixelRows,
+            palette: pixelPalette
+        )
+        .frame(width: artSize, height: artSize)
+        .drawingGroup()
+    }
+
+    private func atlasSpriteImage(at date: Date, atlas: TamagotchiAtlas) -> Image? {
+        guard
+            let atlasFrameImage = TamagotchiAtlasRenderer.frameImage(
+                for: atlas,
+                frameIndex: atlasFrameIndex(at: date, atlas: atlas)
+            )
+        else {
+            return nil
+        }
+
+        return Image(uiImage: atlasFrameImage)
+    }
+
+    private func atlasFrameIndex(at date: Date, atlas: TamagotchiAtlas) -> Int {
+        Int(date.timeIntervalSinceReferenceDate / atlas.idleAnimation.frameInterval)
+    }
+
     private var pixelRows: [String] {
         var rows = [
             "................",
@@ -940,20 +991,22 @@ private struct PixelTamagotchi: View {
             "................"
         ]
 
-        switch sprite {
-        case .skyBuddy:
+        switch sprite.id {
+        case "skyBuddy":
             rows[1] = ".....BBBBBB....."
 //            rows[6] = mouthCharacter == "S" ? "..BBBBAABBAAAB.." : "..BBBBAABBAABB.."
-        case .peachPal:
+        case "peachPal":
             rows[4] = "..BBBBBBBBBBBB.."
             rows[7] = "..BBBBEBBBEBBB.."
 //            rows[6] = mouthCharacter == "S" ? "..BBBFFFBBBFFB.." : "..BBBFFBBBBFFB.."
-        case .mintBean:
+        case "mintBean":
             if clothing == .topHat || clothing == .crown || clothing == .propellerHat {
                 rows[1] = ".....BBLLBB....."
                 rows[2] = "...BBBLLLLBBB..."
             }
 //            rows[6] = mouthCharacter == "S" ? "..BBCCBBBCCCBB.." : "..BBCCBBBBCCBB.."
+        default:
+            break
         }
 
         if mouthCharacter == "S" {
@@ -1041,7 +1094,7 @@ private struct PixelCharacterGrid: View {
 private struct FlappyTamagotchiGameView: View {
     let theme: AppTheme
     let health: Double
-    let sprite: SpriteProfile
+    let sprite: TamagotchiSpriteProfile
     let clothing: ClothingOption
     let birdVisible: Bool
     let onExit: () -> Void
@@ -1259,7 +1312,7 @@ private struct LaunchingGameSpriteOverlay: View {
     let metrics: LayoutMetrics
     let progress: CGFloat
     let health: Double
-    let sprite: SpriteProfile
+    let sprite: TamagotchiSpriteProfile
     let clothing: ClothingOption
 
     var body: some View {
@@ -1418,7 +1471,8 @@ private struct FlappyPipe: Identifiable {
 private struct DetailPageCard: View {
     let page: HomePage
     let items: [InboxItem]
-    @Binding var selectedSprite: SpriteProfile
+    let availableSprites: [TamagotchiSpriteProfile]
+    @Binding var selectedSprite: TamagotchiSpriteProfile
     @Binding var selectedClothing: ClothingOption
     @Binding var selectedDanceSpeed: DanceSpeed
     @Binding var streakTier: Int
@@ -1492,7 +1546,7 @@ private struct DetailPageCard: View {
             }
             .buttonStyle(.plain)
 
-            ForEach(SpriteProfile.allCases) { sprite in
+            ForEach(availableSprites) { sprite in
                 Button(action: { selectedSprite = sprite }) {
                     HStack(spacing: 10) {
                         Circle()
@@ -2539,91 +2593,6 @@ private enum AppTheme: String, CaseIterable, Identifiable {
             return Color(red: 0.79, green: 0.41, blue: 0.32)
         case .moonlight:
             return Color(red: 0.33, green: 0.48, blue: 0.74)
-        }
-    }
-}
-
-private enum SpriteProfile: String, CaseIterable, Identifiable {
-    case skyBuddy
-    case peachPal
-    case mintBean
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .skyBuddy:
-            return "Sky Buddy"
-        case .peachPal:
-            return "Peach Pal"
-        case .mintBean:
-            return "Mint Bean"
-        }
-    }
-
-    var badgeSymbol: String {
-        switch self {
-        case .skyBuddy:
-            return "cloud.fill"
-        case .peachPal:
-            return "sparkles"
-        case .mintBean:
-            return "leaf.fill"
-        }
-    }
-
-    var badgeColor: Color {
-        switch self {
-        case .skyBuddy:
-            return Color(red: 0.73, green: 0.92, blue: 1.0)
-        case .peachPal:
-            return Color(red: 1.0, green: 0.90, blue: 0.58)
-        case .mintBean:
-            return Color(red: 0.72, green: 1.0, blue: 0.85)
-        }
-    }
-
-    var highlightColor: Color {
-        switch self {
-        case .skyBuddy:
-            return Color(red: 0.33, green: 0.65, blue: 0.98)
-        case .peachPal:
-            return Color(red: 0.98, green: 0.63, blue: 0.36)
-        case .mintBean:
-            return Color(red: 0.12, green: 0.76, blue: 0.60)
-        }
-    }
-
-    var highHealthShellColor: Color {
-        switch self {
-        case .skyBuddy:
-            return Color(red: 0.45, green: 0.73, blue: 0.98)
-        case .peachPal:
-            return Color(red: 0.98, green: 0.65, blue: 0.54)
-        case .mintBean:
-            return Color(red: 0.39, green: 0.82, blue: 0.68)
-        }
-    }
-
-    var midHealthShellColor: Color {
-        switch self {
-        case .skyBuddy:
-            return Color(red: 0.61, green: 0.70, blue: 0.92)
-        case .peachPal:
-            return Color(red: 0.93, green: 0.70, blue: 0.63)
-        case .mintBean:
-            return Color(red: 0.56, green: 0.75, blue: 0.66)
-        }
-    }
-
-    var lowHealthShellColor: Color {
-        switch self {
-        case .skyBuddy:
-            return Color(red: 0.73, green: 0.62, blue: 0.84)
-        case .peachPal:
-            return Color(red: 0.81, green: 0.58, blue: 0.72)
-        case .mintBean:
-            return Color(red: 0.52, green: 0.63, blue: 0.64)
         }
     }
 }
