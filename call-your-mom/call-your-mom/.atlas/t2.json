@@ -1,6 +1,6 @@
 {
-  "id": "t1",
-  "displayName": "T1",
+  "id": "t2",
+  "displayName": "T2",
   "badgeSymbol": "star.fill",
   "badgeColor": "#FDE37B",
   "highlightColor": "#FF7A59",
@@ -10,7 +10,7 @@
     "low": "#A07CCF"
   },
   "atlas": {
-    "image": "t1",
+    "image": "t2",
     "frameSize": { "width": 1024, "height": 1024 },
     "idleAnimation": {
       "fps": 10,
@@ -18,7 +18,8 @@
         { "column": 0, "row": 0 },
         { "column": 1, "row": 0 },
         { "column": 0, "row": 1 },
-        { "column": 1, "row": 1 }
+        { "column": 1, "row": 1 },
+        { "column": 0, "row": 2 }
       ]
     }
   }
