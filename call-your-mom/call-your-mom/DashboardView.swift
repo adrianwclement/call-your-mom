@@ -753,7 +753,7 @@ private struct QuickActionsFlyout: View {
         VStack(spacing: 10) {
             ExpandableActionRow(icon: "phone.fill", title: "Call now", subtitle: "Jump straight into a check-in.")
             ExpandableActionRow(icon: "bell.fill", title: "Set reminder", subtitle: "Pick a time for your next call.")
-            ExpandableActionRow(icon: "person.crop.circle.badge.plus", title: "Choose contact", subtitle: "Change who today’s reminder is for.")
+            ExpandableActionRow(icon: "person.crop.circle.badge.plus", title: "Choose contact", subtitle: "Change who today's reminder is for.")
         }
     }
 }
@@ -810,24 +810,24 @@ private struct IntegratedTamagotchiStage: View {
     let isGameMode: Bool
     let hidesSprite: Bool
     let onLaunchGame: () -> Void
-    @State private var dancePhase = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
             if !hidesSprite {
-                PixelTamagotchi(health: health, sprite: sprite, clothing: clothing)
-                    .offset(y: dancePhase ? -18 : -6)
-                    .animation(
-                        .easeInOut(duration: danceSpeed.duration).repeatForever(autoreverses: true),
-                        value: dancePhase
-                    )
+                PixelTamagotchi(
+                    health: health,
+                    sprite: sprite,
+                    clothing: clothing,
+                    danceSpeed: danceSpeed
+                )
+                .offset(y: 50)
             }
 
             Ellipse()
                 .fill(Color.black.opacity(0.10))
                 .frame(width: 120, height: 20)
                 .blur(radius: 4)
-                .offset(y: 28)
+                .offset(y: 20)
 
             if !isGameMode {
                 VStack {
@@ -854,40 +854,24 @@ private struct IntegratedTamagotchiStage: View {
             }
         }
         .frame(height: 300)
-        .onAppear {
-            startDance()
-        }
-        .onChange(of: danceSpeed) {
-            startDance()
-        }
-        .onChange(of: isGameMode) { _, newValue in
-            if !newValue {
-                startDance()
-            }
-        }
     }
 
-    private func startDance() {
-        dancePhase = false
-        withAnimation(.easeInOut(duration: danceSpeed.duration).repeatForever(autoreverses: true)) {
-            dancePhase = true
-        }
-    }
 }
 
 private struct PixelTamagotchi: View {
     let health: Double
     let sprite: TamagotchiSpriteProfile
     let clothing: ClothingOption
-    var artSize: CGFloat = 150
+    var artSize: CGFloat = 200
     var showsLabels: Bool = true
     var showsBadge: Bool = true
+    var danceSpeed: DanceSpeed = .normal
 
     var body: some View {
         VStack(spacing: showsLabels ? 10 : 0) {
             ZStack(alignment: .topTrailing) {
                 if let atlas = sprite.atlas {
-                    TimelineView(.animation(minimumInterval: atlas.idleAnimation.frameInterval, paused: false)) { context in
+                    TimelineView(.animation(minimumInterval: frameInterval(for: atlas), paused: false)) { context in
                         if let atlasSpriteImage = atlasSpriteImage(at: context.date, atlas: atlas) {
                             atlasSpriteImage
                                 .resizable()
@@ -910,9 +894,6 @@ private struct PixelTamagotchi: View {
             }
 
             if showsLabels {
-                Text(healthLabel)
-                    .font(.system(size: 15, weight: .black, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.92))
 
                 Text(sprite.displayName)
                     .font(.system(size: 12, weight: .bold, design: .rounded))
@@ -931,15 +912,6 @@ private struct PixelTamagotchi: View {
         }
     }
 
-    private var healthLabel: String {
-        if health > 70 {
-            return "Feeling loved"
-        } else if health > 35 {
-            return "Needs a call soon"
-        } else {
-            return "Running low"
-        }
-    }
 
     private var mouthCharacter: Character {
         health > 35 ? "M" : "S"
@@ -952,6 +924,12 @@ private struct PixelTamagotchi: View {
         )
         .frame(width: artSize, height: artSize)
         .drawingGroup()
+    }
+
+    private func frameInterval(for atlas: TamagotchiAtlas) -> TimeInterval {
+        let baseInterval = atlas.idleAnimation.frameInterval
+        // Apply dance speed multiplier inversely (faster speed = shorter interval)
+        return baseInterval / danceSpeed.animationSpeedMultiplier
     }
 
     private func atlasSpriteImage(at date: Date, atlas: TamagotchiAtlas) -> Image? {
@@ -968,7 +946,8 @@ private struct PixelTamagotchi: View {
     }
 
     private func atlasFrameIndex(at date: Date, atlas: TamagotchiAtlas) -> Int {
-        Int(date.timeIntervalSinceReferenceDate / atlas.idleAnimation.frameInterval)
+        let adjustedInterval = atlas.idleAnimation.frameInterval / danceSpeed.animationSpeedMultiplier
+        return Int(date.timeIntervalSinceReferenceDate / adjustedInterval)
     }
 
     private var pixelRows: [String] {
@@ -2489,14 +2468,14 @@ private enum DanceSpeed: String, CaseIterable, Identifiable {
         }
     }
 
-    var duration: Double {
+    var animationSpeedMultiplier: Double {
         switch self {
         case .chill:
-            return 0.95
+            return 0.5  // Half speed = 0.5x fps
         case .normal:
-            return 0.55
+            return 1.0  // Normal speed
         case .turbo:
-            return 0.28
+            return 2.0  // Double speed = 2x fps
         }
     }
 }

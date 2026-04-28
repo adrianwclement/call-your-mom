@@ -1,0 +1,27 @@
+{
+  "id": "imp",
+  "displayName": "Imp",
+  "badgeSymbol": "star.fill",
+  "badgeColor": "#FDE37B",
+  "highlightColor": "#FF7A59",
+  "healthShellColors": {
+    "high": "#58C8FF",
+    "mid": "#7BA7FF",
+    "low": "#A07CCF"
+  },
+  "atlas": {
+    "image": "imp",
+    "frameSize": { "width": 1024, "height": 1024 },
+    "idleAnimation": {
+      "fps": 10,
+      "frames": [
+        { "column": 0, "row": 0 },
+        { "column": 1, "row": 0 },
+        { "column": 0, "row": 1 },
+        { "column": 1, "row": 1 },
+        { "column": 0, "row": 2 },
+        { "column": 1, "row": 2 }
+      ]
+    }
+  }
+}
