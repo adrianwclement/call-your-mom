@@ -1075,22 +1075,9 @@ private struct PixelTamagotchi: View {
             "................"
         ]
 
-        switch sprite.id {
-        case "skyBuddy":
-            rows[1] = ".....BBBBBB....."
-//            rows[6] = mouthCharacter == "S" ? "..BBBBAABBAAAB.." : "..BBBBAABBAABB.."
-        case "peachPal":
-            rows[4] = "..BBBBBBBBBBBB.."
-            rows[7] = "..BBBBEBBBEBBB.."
-//            rows[6] = mouthCharacter == "S" ? "..BBBFFFBBBFFB.." : "..BBBFFBBBBFFB.."
-        case "mintBean":
-            if clothing == .topHat || clothing == .crown || clothing == .propellerHat {
-                rows[1] = ".....BBLLBB....."
-                rows[2] = "...BBBLLLLBBB..."
-            }
-//            rows[6] = mouthCharacter == "S" ? "..BBCCBBBCCCBB.." : "..BBCCBBBBCCBB.."
-        default:
-            break
+        if clothing == .topHat || clothing == .crown || clothing == .propellerHat {
+            rows[1] = ".....BBLLBB....."
+            rows[2] = "...BBBLLLLBBB..."
         }
 
         if mouthCharacter == "S" {

@@ -43,41 +43,7 @@ struct AtlasFrame: Equatable {
 }
 
 enum TamagotchiSpriteCatalog {
-    static let defaultProfiles: [TamagotchiSpriteProfile] = [
-        TamagotchiSpriteProfile(
-            id: "skyBuddy",
-            displayName: "Sky Buddy",
-            badgeSymbol: "cloud.fill",
-            badgeColor: Color(hex: "#BAEAFF"),
-            highlightColor: Color(hex: "#54A6FA"),
-            highHealthShellColor: Color(hex: "#73BAFA"),
-            midHealthShellColor: Color(hex: "#9BB3EB"),
-            lowHealthShellColor: Color(hex: "#BA9ED6"),
-            atlas: nil
-        ),
-        TamagotchiSpriteProfile(
-            id: "peachPal",
-            displayName: "Peach Pal",
-            badgeSymbol: "sparkles",
-            badgeColor: Color(hex: "#FFE594"),
-            highlightColor: Color(hex: "#FAA15C"),
-            highHealthShellColor: Color(hex: "#FAA68A"),
-            midHealthShellColor: Color(hex: "#EDB3A1"),
-            lowHealthShellColor: Color(hex: "#CF94B8"),
-            atlas: nil
-        ),
-        TamagotchiSpriteProfile(
-            id: "mintBean",
-            displayName: "Mint Bean",
-            badgeSymbol: "leaf.fill",
-            badgeColor: Color(hex: "#B8FFDA"),
-            highlightColor: Color(hex: "#1FC29A"),
-            highHealthShellColor: Color(hex: "#63D1AD"),
-            midHealthShellColor: Color(hex: "#8FBFA8"),
-            lowHealthShellColor: Color(hex: "#85A0A3"),
-            atlas: nil
-        )
-    ]
+    static let defaultProfiles: [TamagotchiSpriteProfile] = []
 
     static var defaultSprite: TamagotchiSpriteProfile {
         defaultProfiles.first ?? TamagotchiSpriteProfile(

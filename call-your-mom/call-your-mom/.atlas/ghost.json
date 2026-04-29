@@ -1,6 +1,6 @@
 {
-  "id": "t1",
-  "displayName": "Slime",
+  "id": "ghost",
+  "displayName": "Ghost",
   "badgeSymbol": "star.fill",
   "badgeColor": "#FDE37B",
   "highlightColor": "#FF7A59",
@@ -10,7 +10,7 @@
     "low": "#A07CCF"
   },
   "atlas": {
-    "image": "t1",
+    "image": "ghost",
     "frameSize": { "width": 1024, "height": 1024 },
     "idleAnimation": {
       "fps": 10,
