@@ -93,6 +93,13 @@ enum TamagotchiSpriteCatalog {
         )
     }
 
+    static func preferredInitialSprite(from sprites: [TamagotchiSpriteProfile]) -> TamagotchiSpriteProfile {
+        if let t1Sprite = sprites.first(where: { $0.id == "t1" }) {
+            return t1Sprite
+        }
+        return sprites.first ?? defaultSprite
+    }
+
     static func load() -> [TamagotchiSpriteProfile] {
         var orderedProfiles = defaultProfiles
         var profileByID = Dictionary(uniqueKeysWithValues: defaultProfiles.map { ($0.id, $0) })

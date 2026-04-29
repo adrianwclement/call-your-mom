@@ -31,7 +31,7 @@ struct DashboardView: View {
         CallLogEntry(name: "Dad", minutes: 9, loggedAt: Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date())
     ]
     @State private var availableSprites: [TamagotchiSpriteProfile] = TamagotchiSpriteCatalog.load()
-    @State private var selectedSprite: TamagotchiSpriteProfile = TamagotchiSpriteCatalog.defaultSprite
+    @State private var selectedSprite: TamagotchiSpriteProfile = TamagotchiSpriteCatalog.preferredInitialSprite(from: TamagotchiSpriteCatalog.load())
     @State private var selectedClothing: ClothingOption = .none
     @State private var selectedDanceSpeed: DanceSpeed = .normal
     @State private var streakTier: Int = 1
@@ -40,6 +40,8 @@ struct DashboardView: View {
     @State private var isGameMode = false
     @State private var isLaunchingGame = false
     @State private var gameEntryProgress: CGFloat = 0
+    @State private var isSpritePickerVisible = false
+    @State private var homeSwipeOffset: CGFloat = 0
     private let decayTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var notifications: [InboxItem] {
@@ -194,32 +196,95 @@ struct DashboardView: View {
 
     @ViewBuilder
     private func homeView(metrics: LayoutMetrics, isShowingGame: Bool, isLaunchingGame: Bool) -> some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(spacing: metrics.sectionSpacing) {
-                if quickActionsExpanded {
-                    QuickActionsFlyout()
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                }
+        GeometryReader { geometry in
+            let panelWidth = geometry.size.width
+            let settledOffset = isSpritePickerVisible ? panelWidth : 0
+            let combinedOffset = min(max(settledOffset + homeSwipeOffset, 0), panelWidth)
 
-                FloatingHealthBar(health: health, isAnimating: healthPulse)
-
-                IntegratedTamagotchiStage(
+            HStack(spacing: 0) {
+                SpriteSelectionGridView(
+                    sprites: availableSprites,
+                    selectedSprite: selectedSprite,
+                    selectedClothing: selectedClothing,
                     health: health,
-                    sprite: selectedSprite,
-                    clothing: selectedClothing,
-                    danceSpeed: selectedDanceSpeed,
-                    isGameMode: isShowingGame,
-                    hidesSprite: isLaunchingGame,
-                    onLaunchGame: enterGameMode
+                    selectedDanceSpeed: selectedDanceSpeed,
+                    onSelectSprite: { sprite in
+                        selectedSprite = sprite
+                    }
                 )
+                .padding(.horizontal, metrics.horizontalPadding)
+                .padding(.bottom, metrics.contentBottomPadding)
+                .frame(width: panelWidth)
+                .frame(minHeight: metrics.minContentHeight)
 
-                Spacer(minLength: 0)
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: metrics.sectionSpacing) {
+                        if quickActionsExpanded {
+                            QuickActionsFlyout()
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+
+                        FloatingHealthBar(health: health, isAnimating: healthPulse)
+
+                        IntegratedTamagotchiStage(
+                            health: health,
+                            sprite: selectedSprite,
+                            clothing: selectedClothing,
+                            danceSpeed: selectedDanceSpeed,
+                            isGameMode: isShowingGame,
+                            hidesSprite: isLaunchingGame,
+                            onLaunchGame: enterGameMode
+                        )
+
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, metrics.horizontalPadding)
+                    .padding(.bottom, metrics.contentBottomPadding)
+                    .frame(maxWidth: .infinity, minHeight: metrics.minContentHeight)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(width: panelWidth)
+                .frame(minHeight: metrics.minContentHeight)
             }
-            .padding(.horizontal, metrics.horizontalPadding)
-            .padding(.bottom, metrics.contentBottomPadding)
-            .frame(maxWidth: .infinity, minHeight: metrics.minContentHeight)
+            .offset(x: -panelWidth + combinedOffset)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard !isShowingGame else { return }
+                        guard abs(value.translation.width) >= abs(value.translation.height) else { return }
+                        let baseOffset = isSpritePickerVisible ? panelWidth : 0
+                        let nextOffset = baseOffset + value.translation.width
+                        homeSwipeOffset = min(max(nextOffset - baseOffset, -baseOffset), panelWidth - baseOffset)
+                    }
+                    .onEnded { value in
+                        guard !isShowingGame else { return }
+                        guard abs(value.translation.width) >= abs(value.translation.height) else {
+                            withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.86, blendDuration: 0.12)) {
+                                homeSwipeOffset = 0
+                            }
+                            return
+                        }
+                        let baseOffset = isSpritePickerVisible ? panelWidth : 0
+                        let currentOffset = min(max(baseOffset + homeSwipeOffset, 0), panelWidth)
+                        let velocityDelta = value.predictedEndTranslation.width - value.translation.width
+                        let projectedOffset = min(max(currentOffset + velocityDelta * 0.2, 0), panelWidth)
+
+                        let shouldShowPicker: Bool
+                        if projectedOffset > panelWidth * 0.60 {
+                            shouldShowPicker = true
+                        } else if projectedOffset < panelWidth * 0.40 {
+                            shouldShowPicker = false
+                        } else {
+                            shouldShowPicker = isSpritePickerVisible
+                        }
+
+                        withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.86, blendDuration: 0.12)) {
+                            isSpritePickerVisible = shouldShowPicker
+                            homeSwipeOffset = 0
+                        }
+                    }
+            )
         }
-        .scrollBounceBehavior(.basedOnSize)
     }
 
     private var preferredContact: AppContact? {
@@ -312,14 +377,11 @@ struct DashboardView: View {
                     DetailPageCard(
                         page: page,
                         items: notifications,
-                        availableSprites: availableSprites,
-                        selectedSprite: $selectedSprite,
                         selectedClothing: $selectedClothing,
                         selectedDanceSpeed: $selectedDanceSpeed,
                         streakTier: $streakTier,
                         selectedTheme: $selectedTheme,
-                        streakDays: $streakDays,
-                        onRotateSprite: rotateSprite
+                        streakDays: $streakDays
                     )
                 }
             }
@@ -343,18 +405,6 @@ struct DashboardView: View {
         logCall(name: contact.name, minutes: minutes)
     }
 
-    private func rotateSprite() {
-        let allSprites = availableSprites
-        guard !allSprites.isEmpty else { return }
-        guard let currentIndex = allSprites.firstIndex(of: selectedSprite) else {
-            selectedSprite = allSprites.first ?? TamagotchiSpriteCatalog.defaultSprite
-            return
-        }
-
-        let nextIndex = (currentIndex + 1) % allSprites.count
-        selectedSprite = allSprites[nextIndex]
-    }
-
     private func reloadSpriteCatalog() {
         let loadedSprites = TamagotchiSpriteCatalog.load()
         guard !loadedSprites.isEmpty else { return }
@@ -362,8 +412,8 @@ struct DashboardView: View {
 
         if let existing = loadedSprites.first(where: { $0.id == selectedSprite.id }) {
             selectedSprite = existing
-        } else if let first = loadedSprites.first {
-            selectedSprite = first
+        } else {
+            selectedSprite = TamagotchiSpriteCatalog.preferredInitialSprite(from: loadedSprites)
         }
     }
 
@@ -856,6 +906,61 @@ private struct IntegratedTamagotchiStage: View {
         .frame(height: 300)
     }
 
+}
+
+private struct SpriteSelectionGridView: View {
+    let sprites: [TamagotchiSpriteProfile]
+    let selectedSprite: TamagotchiSpriteProfile
+    let selectedClothing: ClothingOption
+    let health: Double
+    let selectedDanceSpeed: DanceSpeed
+    let onSelectSprite: (TamagotchiSpriteProfile) -> Void
+
+    private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Choose Sprite")
+                .font(.system(size: 22, weight: .black, design: .rounded))
+                .foregroundStyle(Color(red: 0.09, green: 0.16, blue: 0.26))
+
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVGrid(columns: columns, spacing: 12) {
+                    ForEach(sprites) { sprite in
+                        Button(action: { onSelectSprite(sprite) }) {
+                            VStack(spacing: 8) {
+                                PixelTamagotchi(
+                                    health: health,
+                                    sprite: sprite,
+                                    clothing: selectedClothing,
+                                    artSize: 96,
+                                    showsLabels: false,
+                                    showsBadge: false,
+                                    danceSpeed: selectedDanceSpeed
+                                )
+                                Text(sprite.displayName)
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    .foregroundStyle(Color(red: 0.09, green: 0.16, blue: 0.26))
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .fill(Color.white.opacity(0.82))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                            .stroke(sprite == selectedSprite ? sprite.highlightColor : Color.black.opacity(0.08), lineWidth: sprite == selectedSprite ? 3 : 1)
+                                    )
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.bottom, 8)
+            }
+        }
+    }
 }
 
 private struct PixelTamagotchi: View {
@@ -1450,14 +1555,11 @@ private struct FlappyPipe: Identifiable {
 private struct DetailPageCard: View {
     let page: HomePage
     let items: [InboxItem]
-    let availableSprites: [TamagotchiSpriteProfile]
-    @Binding var selectedSprite: TamagotchiSpriteProfile
     @Binding var selectedClothing: ClothingOption
     @Binding var selectedDanceSpeed: DanceSpeed
     @Binding var streakTier: Int
     @Binding var selectedTheme: AppTheme
     @Binding var streakDays: Int
-    let onRotateSprite: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1500,59 +1602,6 @@ private struct DetailPageCard: View {
 
     private var upgradesSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Sprite")
-                .font(.system(size: 14, weight: .black, design: .rounded))
-                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
-
-            Text("Active sprite: \(selectedSprite.displayName)")
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
-
-            Button(action: onRotateSprite) {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 14, weight: .bold))
-                    Text("Rotate Sprite")
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(selectedSprite.highlightColor)
-                )
-            }
-            .buttonStyle(.plain)
-
-            ForEach(availableSprites) { sprite in
-                Button(action: { selectedSprite = sprite }) {
-                    HStack(spacing: 10) {
-                        Circle()
-                            .fill(sprite.highlightColor)
-                            .frame(width: 14, height: 14)
-
-                        Text(sprite.displayName)
-                            .font(.system(size: 15, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
-
-                        Spacer()
-
-                        if sprite == selectedSprite {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundStyle(sprite.highlightColor)
-                        }
-                    }
-                    .padding(12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color.white.opacity(0.70))
-                    )
-                }
-                .buttonStyle(.plain)
-            }
-
             Text("Clothing")
                 .font(.system(size: 14, weight: .black, design: .rounded))
                 .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
@@ -1595,7 +1644,7 @@ private struct DetailPageCard: View {
                             .padding(.vertical, 8)
                             .background(
                                 Capsule(style: .continuous)
-                                    .fill(selectedDanceSpeed == speed ? selectedSprite.highlightColor : Color.white.opacity(0.72))
+                                    .fill(selectedDanceSpeed == speed ? Color(red: 0.16, green: 0.63, blue: 0.53) : Color.white.opacity(0.72))
                             )
                     }
                     .buttonStyle(.plain)
