@@ -40,8 +40,8 @@ struct DashboardView: View {
     @State private var isGameMode = false
     @State private var isLaunchingGame = false
     @State private var gameEntryProgress: CGFloat = 0
-    @State private var isSpritePickerVisible = false
-    @State private var homeSwipeOffset: CGFloat = 0
+    @State private var activeHomePanelIndex = 1
+    @State private var homeDragTranslation: CGFloat = 0
     private let decayTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var notifications: [InboxItem] {
@@ -198,8 +198,8 @@ struct DashboardView: View {
     private func homeView(metrics: LayoutMetrics, isShowingGame: Bool, isLaunchingGame: Bool) -> some View {
         GeometryReader { geometry in
             let panelWidth = geometry.size.width
-            let settledOffset = isSpritePickerVisible ? panelWidth : 0
-            let combinedOffset = min(max(settledOffset + homeSwipeOffset, 0), panelWidth)
+            let baseOffset = CGFloat(activeHomePanelIndex) * panelWidth
+            let currentOffset = min(max(baseOffset - homeDragTranslation, 0), panelWidth * 2)
 
             HStack(spacing: 0) {
                 SpriteSelectionGridView(
@@ -245,42 +245,40 @@ struct DashboardView: View {
                 .scrollBounceBehavior(.basedOnSize)
                 .frame(width: panelWidth)
                 .frame(minHeight: metrics.minContentHeight)
+
+                PixelGardenPlaygroundView(
+                    sprites: availableSprites,
+                    selectedClothing: selectedClothing
+                )
+                .padding(.horizontal, metrics.horizontalPadding)
+                .padding(.bottom, metrics.contentBottomPadding)
+                .frame(width: panelWidth)
+                .frame(minHeight: metrics.minContentHeight)
             }
-            .offset(x: -panelWidth + combinedOffset)
+            .offset(x: -currentOffset)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         guard !isShowingGame else { return }
                         guard abs(value.translation.width) >= abs(value.translation.height) else { return }
-                        let baseOffset = isSpritePickerVisible ? panelWidth : 0
-                        let nextOffset = baseOffset + value.translation.width
-                        homeSwipeOffset = min(max(nextOffset - baseOffset, -baseOffset), panelWidth - baseOffset)
+                        homeDragTranslation = value.translation.width
                     }
                     .onEnded { value in
                         guard !isShowingGame else { return }
                         guard abs(value.translation.width) >= abs(value.translation.height) else {
                             withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.86, blendDuration: 0.12)) {
-                                homeSwipeOffset = 0
+                                homeDragTranslation = 0
                             }
                             return
                         }
-                        let baseOffset = isSpritePickerVisible ? panelWidth : 0
-                        let currentOffset = min(max(baseOffset + homeSwipeOffset, 0), panelWidth)
                         let velocityDelta = value.predictedEndTranslation.width - value.translation.width
-                        let projectedOffset = min(max(currentOffset + velocityDelta * 0.2, 0), panelWidth)
-
-                        let shouldShowPicker: Bool
-                        if projectedOffset > panelWidth * 0.60 {
-                            shouldShowPicker = true
-                        } else if projectedOffset < panelWidth * 0.40 {
-                            shouldShowPicker = false
-                        } else {
-                            shouldShowPicker = isSpritePickerVisible
-                        }
+                        let projectedOffset = min(max(baseOffset - value.translation.width - (velocityDelta * 0.2), 0), panelWidth * 2)
+                        let resolvedPanel = Int((projectedOffset / panelWidth).rounded())
+                        let clampedPanel = min(max(resolvedPanel, 0), 2)
 
                         withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.86, blendDuration: 0.12)) {
-                            isSpritePickerVisible = shouldShowPicker
-                            homeSwipeOffset = 0
+                            activeHomePanelIndex = clampedPanel
+                            homeDragTranslation = 0
                         }
                     }
             )
@@ -961,6 +959,150 @@ private struct SpriteSelectionGridView: View {
             }
         }
     }
+}
+
+private struct PixelGardenPlaygroundView: View {
+    let sprites: [TamagotchiSpriteProfile]
+    let selectedClothing: ClothingOption
+
+    @State private var pets: [GardenPet] = []
+    @State private var lastTick = Date()
+    private let tickTimer = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
+    private let shelfRatios: [CGFloat] = [0.30, 0.50, 0.70]
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+            let shelfYs = shelfRatios.map { size.height * $0 }
+            let floorY = size.height * 0.84
+
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .fill(Color.white.opacity(0.42))
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Pixel Garden")
+                        .font(.system(size: 24, weight: .black, design: .rounded))
+                        .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                    Text("Swipe back to home. Plants coming soon.")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color(red: 0.31, green: 0.45, blue: 0.50))
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+
+                ForEach(Array(shelfYs.enumerated()), id: \.offset) { index, y in
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color(red: 0.56, green: 0.40, blue: 0.25).opacity(0.80))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(Color.white.opacity(0.34), lineWidth: 1)
+                        )
+                        .frame(width: size.width - 28, height: 12)
+                        .position(x: size.width / 2, y: y)
+
+                    if index < shelfYs.count - 1 {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color(red: 0.51, green: 0.36, blue: 0.23).opacity(0.85))
+                            .frame(width: 10, height: shelfYs[index + 1] - y)
+                            .position(x: 24, y: y + ((shelfYs[index + 1] - y) / 2))
+                    }
+                }
+
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color(red: 0.45, green: 0.34, blue: 0.22).opacity(0.92))
+                    .frame(width: size.width - 28, height: 16)
+                    .position(x: size.width / 2, y: floorY)
+
+                ForEach($pets) { $pet in
+                    PixelTamagotchi(
+                        health: 100,
+                        sprite: pet.sprite,
+                        clothing: selectedClothing,
+                        artSize: 66,
+                        showsLabels: false,
+                        showsBadge: false
+                    )
+                    .rotationEffect(.degrees(Double(max(-18, min(18, pet.velocity.width * 0.03)))))
+                    .position(pet.position)
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                pet.isHeld = true
+                                pet.position = value.location
+                            }
+                            .onEnded { value in
+                                pet.isHeld = false
+                                let deltaX = value.predictedEndLocation.x - value.location.x
+                                let deltaY = value.predictedEndLocation.y - value.location.y
+                                pet.velocity = CGSize(width: deltaX * 2.4, height: deltaY * 2.4)
+                            }
+                    )
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .onAppear {
+                if pets.isEmpty || pets.map(\.sprite.id) != sprites.map(\.id) {
+                    let initialSprites = sprites.isEmpty ? [TamagotchiSpriteCatalog.defaultSprite] : sprites
+                    pets = initialSprites.enumerated().map { index, sprite in
+                        let shelf = index % shelfYs.count
+                        return GardenPet(
+                            sprite: sprite,
+                            position: CGPoint(x: CGFloat.random(in: 70...(max(80, size.width - 70))), y: shelfYs[shelf] - 36),
+                            velocity: CGSize(width: CGFloat.random(in: -20...20), height: 0),
+                            shelfIndex: shelf
+                        )
+                    }
+                }
+                lastTick = Date()
+            }
+            .onReceive(tickTimer) { now in
+                let dt = min(max(now.timeIntervalSince(lastTick), 0), 1.0 / 20.0)
+                lastTick = now
+                guard !pets.isEmpty else { return }
+
+                for index in pets.indices {
+                    if pets[index].isHeld { continue }
+
+                    pets[index].velocity.height += CGFloat(900 * dt)
+                    pets[index].position.x += pets[index].velocity.width * CGFloat(dt)
+                    pets[index].position.y += pets[index].velocity.height * CGFloat(dt)
+
+                    let left = CGFloat(38)
+                    let right = max(left + 1, size.width - 38)
+                    if pets[index].position.x < left {
+                        pets[index].position.x = left
+                        pets[index].velocity.width = abs(pets[index].velocity.width) * 0.7
+                    } else if pets[index].position.x > right {
+                        pets[index].position.x = right
+                        pets[index].velocity.width = -abs(pets[index].velocity.width) * 0.7
+                    }
+
+                    let shelfLandingY = shelfYs[pets[index].shelfIndex] - 36
+                    if pets[index].position.y > floorY - 38 {
+                        pets[index].position.y = floorY - 38
+                        pets[index].velocity.height = 0
+                        pets[index].velocity.width = max(-80, min(80, pets[index].velocity.width))
+                    } else if pets[index].position.y >= shelfLandingY && pets[index].velocity.height > 0 {
+                        pets[index].position.y = shelfLandingY
+                        pets[index].velocity.height = 0
+                        if abs(pets[index].velocity.width) < 8 {
+                            pets[index].velocity.width = CGFloat.random(in: -35...35)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct GardenPet: Identifiable {
+    let id = UUID()
+    let sprite: TamagotchiSpriteProfile
+    var position: CGPoint
+    var velocity: CGSize
+    var shelfIndex: Int
+    var isHeld = false
 }
 
 private struct PixelTamagotchi: View {
