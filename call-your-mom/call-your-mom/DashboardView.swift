@@ -29,15 +29,11 @@ struct DashboardView: View {
     @State private var healthPulse = false
     @State private var lastHealthUpdatedAt = Date()
     @State private var wasBelowLowHealthThreshold = false
-    @State private var callLogs: [CallLogEntry] = [
-        CallLogEntry(name: "Mom", minutes: 18, loggedAt: Date()),
-        CallLogEntry(name: "Dad", minutes: 9, loggedAt: Calendar.current.date(byAdding: .day, value: -1, to: Date()) ?? Date())
-    ]
+    @State private var callLogs: [CallLogEntry] = []
     @State private var availableSprites: [TamagotchiSpriteProfile] = TamagotchiSpriteCatalog.load()
     @State private var selectedSprite: TamagotchiSpriteProfile = TamagotchiSpriteCatalog.preferredInitialSprite(from: TamagotchiSpriteCatalog.load())
     @State private var selectedClothing: ClothingOption = .none
     @State private var selectedDanceSpeed: DanceSpeed = .normal
-    @State private var streakTier: Int = 1
     @State private var selectedTheme: AppTheme = .meadow
     @State private var streakDays: Int = 0
     @State private var isContactPickerPresented = false
@@ -52,6 +48,10 @@ struct DashboardView: View {
 
     private var notifications: [InboxItem] {
         buildNotifications()
+    }
+
+    private var streakTier: Int {
+        StreakCalculator.tier(for: streakDays)
     }
 
     var body: some View {
@@ -338,8 +338,9 @@ struct DashboardView: View {
         callLogs.insert(CallLogEntry(name: name, minutes: minutes, loggedAt: Date()), at: 0)
         refreshStreakDays()
 
-        let streakBonus = Double(streakTier * 2)
-        let healingAmount = max(12, min(Double(minutes), 25)) + streakBonus
+        let durationHealing = min(max(Double(minutes) * 1.5, 18), 45)
+        let streakBonus = Double(streakTier * 4)
+        let healingAmount = durationHealing + streakBonus
         health = min(health + healingAmount, 100)
         selectedLogContactID = preferredContactID
         logMinutes = String(defaultCallMinutes)
@@ -424,7 +425,7 @@ struct DashboardView: View {
                         items: notifications,
                         selectedClothing: $selectedClothing,
                         selectedDanceSpeed: $selectedDanceSpeed,
-                        streakTier: $streakTier,
+                        streakTier: streakTier,
                         selectedTheme: $selectedTheme,
                         streakDays: $streakDays
                     )
@@ -1938,7 +1939,7 @@ private struct DetailPageCard: View {
     let items: [InboxItem]
     @Binding var selectedClothing: ClothingOption
     @Binding var selectedDanceSpeed: DanceSpeed
-    @Binding var streakTier: Int
+    let streakTier: Int
     @Binding var selectedTheme: AppTheme
     @Binding var streakDays: Int
 
@@ -2038,18 +2039,33 @@ private struct DetailPageCard: View {
                 .font(.system(size: 14, weight: .black, design: .rounded))
                 .foregroundStyle(DetailCardPalette.primaryText)
 
-            Stepper(value: $streakTier, in: 1...3) {
-                Text("Streak Boost Tier \(streakTier)")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundStyle(DetailCardPalette.bodyText)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Streak Boost Tier \(streakTier)")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundStyle(DetailCardPalette.bodyText)
+
+                    Spacer(minLength: 8)
+
+                    Text(StreakCalculator.label(for: streakDays))
+                        .font(.system(size: 12, weight: .black, design: .rounded))
+                        .foregroundStyle(Color(red: 0.11, green: 0.62, blue: 0.54))
+                }
+
+                ProgressView(value: Double(streakTier), total: 3)
+                    .tint(Color(red: 0.12, green: 0.76, blue: 0.60))
             }
-            .tint(DetailCardPalette.bodyText)
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(DetailCardPalette.surfaceFill)
+            )
 
             Text("Current streak: \(streakDays) days")
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color(red: 0.21, green: 0.33, blue: 0.40))
 
-            Text("Effect: +\(streakTier * 2) health per call, decay drops to \(max(1, 4 - streakTier)).")
+            Text("Effect: +\(streakTier * 4) health per call. Keep logging calls daily to raise this tier.")
                 .font(.system(size: 12, weight: .bold, design: .rounded))
                 .foregroundStyle(Color(red: 0.35, green: 0.47, blue: 0.52))
 
@@ -2968,6 +2984,28 @@ private enum StreakCalculator {
         }
 
         return streak
+    }
+
+    static func tier(for streakDays: Int) -> Int {
+        switch streakDays {
+        case 7...:
+            return 3
+        case 3...:
+            return 2
+        default:
+            return 1
+        }
+    }
+
+    static func label(for streakDays: Int) -> String {
+        switch streakDays {
+        case 7...:
+            return "Max"
+        case 3...:
+            return "\(7 - streakDays) day\(7 - streakDays == 1 ? "" : "s") to Tier 3"
+        default:
+            return "\(max(0, 3 - streakDays)) day\(max(0, 3 - streakDays) == 1 ? "" : "s") to Tier 2"
+        }
     }
 }
 
