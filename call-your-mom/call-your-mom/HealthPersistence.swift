@@ -15,9 +15,16 @@ enum HealthPersistence {
     private static let callsLoggedKey = "health.callsLogged"
 
     static let defaultHealth = 100.0
-    static let defaultCallsLogged = 1
+    static let defaultCallsLogged = 0
+
+    #if DEBUG
     static let decayAmount = 3.0
     static let decayInterval: TimeInterval = 8.0
+    #else
+    static let decayAmount = 100.0
+    static let decayInterval: TimeInterval = 72 * 60 * 60
+    #endif
+
     static let decayPerSecond = decayAmount / decayInterval
 
     static func load() -> (health: Double, updatedAt: Date, callsLogged: Int) {

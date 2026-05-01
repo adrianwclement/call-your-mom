@@ -1008,6 +1008,39 @@ private struct FloatingHealthBar: View {
     let health: Double
     let isAnimating: Bool
 
+    private var clampedHealth: Double {
+        min(max(health, 0), 100)
+    }
+
+    private var healthGradient: [Color] {
+        switch clampedHealth {
+        case 70...:
+            return [
+                Color(red: 0.32, green: 0.88, blue: 0.58),
+                Color(red: 0.08, green: 0.66, blue: 0.48)
+            ]
+        case 40..<70:
+            return [
+                Color(red: 1.00, green: 0.82, blue: 0.28),
+                Color(red: 0.92, green: 0.56, blue: 0.14)
+            ]
+        case 20..<40:
+            return [
+                Color(red: 1.00, green: 0.56, blue: 0.28),
+                Color(red: 0.93, green: 0.30, blue: 0.18)
+            ]
+        default:
+            return [
+                Color(red: 0.98, green: 0.28, blue: 0.34),
+                Color(red: 0.86, green: 0.10, blue: 0.18)
+            ]
+        }
+    }
+
+    private var glowColor: Color {
+        healthGradient.last ?? Color.red
+    }
+
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
@@ -1018,17 +1051,14 @@ private struct FloatingHealthBar: View {
                 Capsule()
                     .fill(
                         LinearGradient(
-                            colors: [
-                                Color(red: 0.98, green: 0.28, blue: 0.34),
-                                Color(red: 0.86, green: 0.10, blue: 0.18)
-                            ],
+                            colors: healthGradient,
                             startPoint: .leading,
                             endPoint: .trailing
                         )
                     )
-                    .frame(width: max(28, geometry.size.width * (health / 100)), height: 14)
+                    .frame(width: max(28, geometry.size.width * (clampedHealth / 100)), height: 14)
                     .scaleEffect(x: 1, y: isAnimating ? 1.03 : 0.97, anchor: .center)
-                    .shadow(color: Color.red.opacity(0.20), radius: isAnimating ? 8 : 4)
+                    .shadow(color: glowColor.opacity(0.24), radius: isAnimating ? 8 : 4)
                     .animation(.easeInOut(duration: 0.8), value: isAnimating)
                     .animation(.easeInOut(duration: 0.45), value: health)
             }
