@@ -10,10 +10,12 @@ import Foundation
 struct AppContact: Codable, Identifiable, Hashable {
     let id: UUID
     var name: String
+    var phoneNumber: String?
 
-    init(id: UUID = UUID(), name: String) {
+    init(id: UUID = UUID(), name: String, phoneNumber: String? = nil) {
         self.id = id
         self.name = name
+        self.phoneNumber = phoneNumber
     }
 }
 

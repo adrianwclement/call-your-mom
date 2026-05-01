@@ -14,6 +14,7 @@ final class LocalNotificationManager {
     static let lowHealthThreshold = 25.0
     private let lowHealthIdentifier = "low-health-alert"
     private let dailyReminderIdentifier = "daily-call-reminder"
+    private let postCallLogIdentifier = "post-call-log-reminder"
 
     private init() {}
 
@@ -70,5 +71,29 @@ final class LocalNotificationManager {
 
     func clearDailyReminderNotification() {
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [dailyReminderIdentifier])
+    }
+
+    func schedulePostCallLogReminder(contactName: String, after timeInterval: TimeInterval) {
+        guard timeInterval > 0 else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Log your call?"
+        content.body = "Add your call with \(contactName) to keep your Tamagotchi healthy."
+        content.sound = .default
+
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(1, timeInterval), repeats: false)
+        let request = UNNotificationRequest(
+            identifier: postCallLogIdentifier,
+            content: content,
+            trigger: trigger
+        )
+
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: [postCallLogIdentifier])
+        center.add(request)
+    }
+
+    func clearPostCallLogReminder() {
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [postCallLogIdentifier])
     }
 }

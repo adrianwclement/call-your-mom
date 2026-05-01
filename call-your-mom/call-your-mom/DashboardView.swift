@@ -6,10 +6,13 @@
 //
 
 import SwiftUI
+import Contacts
+import ContactsUI
 internal import Combine
 
 struct DashboardView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
 
     @State private var activePage: HomePage = .home
     @State private var pageHistory: [HomePage] = []
@@ -37,6 +40,9 @@ struct DashboardView: View {
     @State private var streakTier: Int = 1
     @State private var selectedTheme: AppTheme = .meadow
     @State private var streakDays: Int = 0
+    @State private var isContactPickerPresented = false
+    @State private var pendingCallSession: PendingCallSession?
+    @State private var postCallPrompt: PendingCallSession?
     @State private var isGameMode = false
     @State private var isLaunchingGame = false
     @State private var gameEntryProgress: CGFloat = 0
@@ -146,8 +152,10 @@ struct DashboardView: View {
             LocalNotificationManager.shared.requestAuthorization()
             restorePersistedHealth()
             restoreSettings()
+            restorePendingCallTracking()
             refreshStreakDays()
             syncNotificationSchedules()
+            presentPostCallPromptIfReady()
         }
         .onReceive(decayTimer) { _ in
             guard scenePhase == .active else { return }
@@ -158,9 +166,12 @@ struct DashboardView: View {
                 reloadSpriteCatalog()
                 restorePersistedHealth()
                 restoreSettings()
+                restorePendingCallTracking()
+                presentPostCallPromptIfReady()
             } else if newValue == .background || newValue == .inactive {
                 persistHealthState()
                 persistSettings()
+                persistPendingCallTracking()
                 syncLowHealthNotification()
             }
         }
@@ -191,6 +202,37 @@ struct DashboardView: View {
             }
             persistSettings()
             syncNotificationSchedules()
+        }
+        .sheet(isPresented: $isContactPickerPresented) {
+            SystemContactPicker { contact in
+                importSystemContact(contact)
+            }
+        }
+        .alert(
+            "Log your call?",
+            isPresented: Binding(
+                get: { postCallPrompt != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        postCallPrompt = nil
+                    }
+                }
+            ),
+            presenting: postCallPrompt
+        ) { session in
+            Button("Save \(estimatedMinutes(for: session)) min") {
+                savePendingCall(session)
+            }
+
+            Button("Review") {
+                reviewPendingCall(session)
+            }
+
+            Button("Later", role: .cancel) {
+                postCallPrompt = nil
+            }
+        } message: { session in
+            Text("Add your call with \(session.contactName) so your Tamagotchi gets credit.")
         }
     }
 
@@ -302,6 +344,7 @@ struct DashboardView: View {
         selectedLogContactID = preferredContactID
         logMinutes = String(defaultCallMinutes)
         lastHealthUpdatedAt = Date()
+        clearPendingCallTracking()
     }
 
     private func applyElapsedDecay(now: Date) {
@@ -359,6 +402,9 @@ struct DashboardView: View {
                         defaultCallMinutes: defaultCallMinutes,
                         entries: callLogs,
                         onSubmit: submitLogEntry,
+                        onSelectRecent: selectRecentLogEntry,
+                        onImportContact: { isContactPickerPresented = true },
+                        onCallContact: callContact,
                         onOpenSettings: { navigate(to: .settings) }
                     )
                 } else if page == .settings {
@@ -369,6 +415,7 @@ struct DashboardView: View {
                         notificationPreferences: $notificationPreferences,
                         defaultCallMinutes: $defaultCallMinutes,
                         onAddContact: addContact,
+                        onImportContact: { isContactPickerPresented = true },
                         onDeleteContact: deleteContact
                     )
                 } else {
@@ -401,6 +448,16 @@ struct DashboardView: View {
         }
 
         logCall(name: contact.name, minutes: minutes)
+    }
+
+    private func selectRecentLogEntry(_ entry: CallLogEntry) {
+        if let matchingContact = contacts.first(where: { contact in
+            contact.name.compare(entry.name, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }) {
+            selectedLogContactID = matchingContact.id
+        }
+
+        logMinutes = String(entry.minutes)
     }
 
     private func reloadSpriteCatalog() {
@@ -447,19 +504,118 @@ struct DashboardView: View {
         let trimmedName = pendingContactName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return }
 
+        upsertContact(name: trimmedName, phoneNumber: nil)
+        pendingContactName = ""
+    }
+
+    private func importSystemContact(_ contact: CNContact) {
+        let name = CNContactFormatter.string(from: contact, style: .fullName)
+            ?? [contact.givenName, contact.familyName].joined(separator: " ")
+        let phoneNumber = contact.phoneNumbers.first?.value.stringValue
+        upsertContact(name: name, phoneNumber: phoneNumber)
+    }
+
+    private func upsertContact(name: String, phoneNumber: String?) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return }
+
         let alreadyExists = contacts.contains { existing in
             existing.name.compare(trimmedName, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
         }
         guard !alreadyExists else {
-            pendingContactName = ""
+            if let phoneNumber,
+               let index = contacts.firstIndex(where: { existing in
+                   existing.name.compare(trimmedName, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+               }) {
+                contacts[index].phoneNumber = phoneNumber
+                selectedLogContactID = contacts[index].id
+            }
             return
         }
 
-        let newContact = AppContact(name: trimmedName)
+        let newContact = AppContact(name: trimmedName, phoneNumber: phoneNumber)
         contacts.append(newContact)
         preferredContactID = preferredContactID ?? newContact.id
         selectedLogContactID = selectedLogContactID ?? newContact.id
-        pendingContactName = ""
+    }
+
+    private func callContact(_ contact: AppContact) {
+        guard
+            let phoneNumber = contact.phoneNumber,
+            !phoneNumber.digitsOnly.isEmpty,
+            let url = URL(string: "tel://\(phoneNumber.digitsOnly)")
+        else {
+            return
+        }
+
+        pendingCallSession = PendingCallSession(
+            contactID: contact.id,
+            contactName: contact.name,
+            startedAt: Date(),
+            fallbackMinutes: defaultCallMinutes
+        )
+        persistPendingCallTracking()
+        selectedLogContactID = contact.id
+        logMinutes = String(defaultCallMinutes)
+        LocalNotificationManager.shared.schedulePostCallLogReminder(
+            contactName: contact.name,
+            after: max(300, TimeInterval(defaultCallMinutes * 60 + 60))
+        )
+        openURL(url)
+    }
+
+    private func presentPostCallPromptIfReady() {
+        guard let session = pendingCallSession else { return }
+
+        let secondsSinceCallStarted = Date().timeIntervalSince(session.startedAt)
+        guard secondsSinceCallStarted >= 20 else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + (20 - secondsSinceCallStarted)) {
+                guard scenePhase == .active else { return }
+                presentPostCallPromptIfReady()
+            }
+            return
+        }
+
+        selectedLogContactID = session.contactID
+        logMinutes = String(estimatedMinutes(for: session))
+        postCallPrompt = session
+    }
+
+    private func savePendingCall(_ session: PendingCallSession) {
+        logCall(name: session.contactName, minutes: estimatedMinutes(for: session))
+    }
+
+    private func reviewPendingCall(_ session: PendingCallSession) {
+        selectedLogContactID = session.contactID
+        logMinutes = String(estimatedMinutes(for: session))
+        postCallPrompt = nil
+        navigate(to: .log)
+    }
+
+    private func estimatedMinutes(for session: PendingCallSession) -> Int {
+        let elapsedMinutes = Int(ceil(Date().timeIntervalSince(session.startedAt) / 60))
+        return max(1, elapsedMinutes == 0 ? session.fallbackMinutes : elapsedMinutes)
+    }
+
+    private func clearPendingCallTracking() {
+        pendingCallSession = nil
+        postCallPrompt = nil
+        PendingCallPersistence.clear()
+        LocalNotificationManager.shared.clearPostCallLogReminder()
+    }
+
+    private func restorePendingCallTracking() {
+        guard pendingCallSession == nil else { return }
+        pendingCallSession = PendingCallPersistence.load()
+    }
+
+    private func persistPendingCallTracking() {
+        guard let pendingCallSession else {
+            PendingCallPersistence.clear()
+            return
+        }
+
+        PendingCallPersistence.save(pendingCallSession)
     }
 
     private func deleteContact(_ contact: AppContact) {
@@ -627,6 +783,91 @@ struct DashboardView: View {
             isLaunchingGame = false
             gameEntryProgress = 0
         }
+    }
+}
+
+private struct SystemContactPicker: UIViewControllerRepresentable {
+    let onSelect: (CNContact) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSelect: onSelect)
+    }
+
+    func makeUIViewController(context: Context) -> CNContactPickerViewController {
+        let picker = CNContactPickerViewController()
+        picker.delegate = context.coordinator
+        picker.displayedPropertyKeys = [
+            CNContactGivenNameKey,
+            CNContactFamilyNameKey,
+            CNContactPhoneNumbersKey
+        ]
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: CNContactPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, CNContactPickerDelegate {
+        let onSelect: (CNContact) -> Void
+
+        init(onSelect: @escaping (CNContact) -> Void) {
+            self.onSelect = onSelect
+        }
+
+        func contactPicker(_ picker: CNContactPickerViewController, didSelect contact: CNContact) {
+            onSelect(contact)
+        }
+    }
+}
+
+private struct PendingCallSession: Codable, Identifiable {
+    let id: UUID
+    let contactID: UUID
+    let contactName: String
+    let startedAt: Date
+    let fallbackMinutes: Int
+
+    init(
+        id: UUID = UUID(),
+        contactID: UUID,
+        contactName: String,
+        startedAt: Date,
+        fallbackMinutes: Int
+    ) {
+        self.id = id
+        self.contactID = contactID
+        self.contactName = contactName
+        self.startedAt = startedAt
+        self.fallbackMinutes = fallbackMinutes
+    }
+}
+
+private enum PendingCallPersistence {
+    private static let storageKey = "pendingCall.session"
+
+    static func load() -> PendingCallSession? {
+        guard
+            let data = UserDefaults.standard.data(forKey: storageKey),
+            let session = try? JSONDecoder().decode(PendingCallSession.self, from: data)
+        else {
+            return nil
+        }
+
+        return session
+    }
+
+    static func save(_ session: PendingCallSession) {
+        guard let encoded = try? JSONEncoder().encode(session) else { return }
+        UserDefaults.standard.set(encoded, forKey: storageKey)
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: storageKey)
+    }
+}
+
+private extension String {
+    var digitsOnly: String {
+        filter(\.isNumber)
     }
 }
 
@@ -1681,6 +1922,17 @@ private struct FlappyPipe: Identifiable {
     }
 }
 
+private enum DetailCardPalette {
+    static let primaryText = Color(red: 0.08, green: 0.15, blue: 0.24)
+    static let secondaryText = Color(red: 0.31, green: 0.45, blue: 0.50)
+    static let bodyText = Color(red: 0.10, green: 0.17, blue: 0.27)
+    static let mutedText = Color(red: 0.39, green: 0.49, blue: 0.54)
+    static let cardFill = Color.white.opacity(0.94)
+    static let cardStroke = Color.white.opacity(0.82)
+    static let surfaceFill = Color.white.opacity(0.92)
+    static let surfaceStrongFill = Color.white.opacity(0.97)
+}
+
 private struct DetailPageCard: View {
     let page: HomePage
     let items: [InboxItem]
@@ -1694,11 +1946,11 @@ private struct DetailPageCard: View {
         VStack(alignment: .leading, spacing: 16) {
             Text(page.title)
                 .font(.system(size: 30, weight: .black, design: .rounded))
-                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                .foregroundStyle(DetailCardPalette.primaryText)
 
             Text(page.description)
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(Color(red: 0.31, green: 0.45, blue: 0.50))
+                .foregroundStyle(DetailCardPalette.secondaryText)
 
             if page == .inbox {
                 VStack(spacing: 10) {
@@ -1720,20 +1972,21 @@ private struct DetailPageCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 30, style: .continuous)
-                .fill(Color.white.opacity(0.78))
+                .fill(DetailCardPalette.cardFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 30, style: .continuous)
-                        .stroke(Color.white.opacity(0.58), lineWidth: 1)
+                        .stroke(DetailCardPalette.cardStroke, lineWidth: 1)
                 )
         )
         .shadow(color: Color.black.opacity(0.10), radius: 20, y: 10)
+        .environment(\.colorScheme, .light)
     }
 
     private var upgradesSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Clothing")
                 .font(.system(size: 14, weight: .black, design: .rounded))
-                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                .foregroundStyle(DetailCardPalette.primaryText)
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                 ForEach(ClothingOption.allCases) { clothing in
@@ -1744,6 +1997,7 @@ private struct DetailPageCard: View {
                                 .frame(width: 12, height: 12)
                             Text(clothing.displayName)
                                 .font(.system(size: 13, weight: .bold, design: .rounded))
+                                .foregroundStyle(DetailCardPalette.bodyText)
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.7)
                             Spacer(minLength: 0)
@@ -1752,7 +2006,7 @@ private struct DetailPageCard: View {
                         .padding(.vertical, 10)
                         .background(
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(selectedClothing == clothing ? clothing.color.opacity(0.25) : Color.white.opacity(0.70))
+                                .fill(selectedClothing == clothing ? clothing.color.opacity(0.25) : DetailCardPalette.surfaceFill)
                         )
                     }
                     .buttonStyle(.plain)
@@ -1761,7 +2015,7 @@ private struct DetailPageCard: View {
 
             Text("Dance Speed")
                 .font(.system(size: 14, weight: .black, design: .rounded))
-                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                .foregroundStyle(DetailCardPalette.primaryText)
 
             HStack(spacing: 8) {
                 ForEach(DanceSpeed.allCases) { speed in
@@ -1771,9 +2025,9 @@ private struct DetailPageCard: View {
                             .foregroundStyle(selectedDanceSpeed == speed ? .white : Color(red: 0.10, green: 0.17, blue: 0.27))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 8)
-                            .background(
-                                Capsule(style: .continuous)
-                                    .fill(selectedDanceSpeed == speed ? Color(red: 0.16, green: 0.63, blue: 0.53) : Color.white.opacity(0.72))
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(selectedDanceSpeed == speed ? Color(red: 0.16, green: 0.63, blue: 0.53) : DetailCardPalette.surfaceFill)
                             )
                     }
                     .buttonStyle(.plain)
@@ -1782,13 +2036,14 @@ private struct DetailPageCard: View {
 
             Text("Streak")
                 .font(.system(size: 14, weight: .black, design: .rounded))
-                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                .foregroundStyle(DetailCardPalette.primaryText)
 
             Stepper(value: $streakTier, in: 1...3) {
                 Text("Streak Boost Tier \(streakTier)")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                    .foregroundStyle(DetailCardPalette.bodyText)
             }
+            .tint(DetailCardPalette.bodyText)
 
             Text("Current streak: \(streakDays) days")
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
@@ -1800,7 +2055,7 @@ private struct DetailPageCard: View {
 
             Text("Themes")
                 .font(.system(size: 14, weight: .black, design: .rounded))
-                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                .foregroundStyle(DetailCardPalette.primaryText)
 
             ForEach(AppTheme.allCases) { theme in
                 Button(action: { selectedTheme = theme }) {
@@ -1813,7 +2068,7 @@ private struct DetailPageCard: View {
 
                         Text(theme.displayName)
                             .font(.system(size: 14, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                            .foregroundStyle(DetailCardPalette.bodyText)
 
                         Spacer()
 
@@ -1826,7 +2081,7 @@ private struct DetailPageCard: View {
                     .padding(12)
                     .background(
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color.white.opacity(0.70))
+                            .fill(DetailCardPalette.surfaceFill)
                     )
                 }
                 .buttonStyle(.plain)
@@ -1842,27 +2097,68 @@ private struct LogPageCard: View {
     let defaultCallMinutes: Int
     let entries: [CallLogEntry]
     let onSubmit: () -> Void
+    let onSelectRecent: (CallLogEntry) -> Void
+    let onImportContact: () -> Void
+    let onCallContact: (AppContact) -> Void
     let onOpenSettings: () -> Void
 
     private var formIsValid: Bool {
         selectedContactID != nil && (Int(minutes) ?? 0) > 0
     }
 
+    private var selectedContact: AppContact? {
+        guard let selectedContactID else { return nil }
+        return contacts.first(where: { $0.id == selectedContactID })
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Log a Call")
                 .font(.system(size: 30, weight: .black, design: .rounded))
-                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                .foregroundStyle(DetailCardPalette.primaryText)
 
             Text("Add who you called and how long you talked so the dashboard can track your recent check-ins.")
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(Color(red: 0.31, green: 0.45, blue: 0.50))
+                .foregroundStyle(DetailCardPalette.secondaryText)
+
+            RecentLogShortcuts(entries: entries, onSelect: onSelectRecent)
 
             if contacts.isEmpty {
-                EmptyLogStateCard(onOpenSettings: onOpenSettings)
+                EmptyLogStateCard(onImportContact: onImportContact, onOpenSettings: onOpenSettings)
             } else {
                 VStack(alignment: .leading, spacing: 14) {
                     ContactPickerField(contacts: contacts, selectedContactID: $selectedContactID)
+
+                    HStack(spacing: 10) {
+                        Button(action: onImportContact) {
+                            Label("Import Contact", systemImage: "person.crop.circle.badge.plus")
+                                .font(.system(size: 13, weight: .black, design: .rounded))
+                                .foregroundStyle(DetailCardPalette.bodyText)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .fill(DetailCardPalette.surfaceFill)
+                                )
+                        }
+                        .buttonStyle(.plain)
+
+                        if let selectedContact, selectedContact.phoneNumber != nil {
+                            Button(action: { onCallContact(selectedContact) }) {
+                                Label("Call", systemImage: "phone.fill")
+                                    .font(.system(size: 13, weight: .black, design: .rounded))
+                                    .foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                            .fill(Color(red: 0.12, green: 0.76, blue: 0.60))
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
                     LogInputField(
                         title: "Minutes",
                         placeholder: String(defaultCallMinutes),
@@ -1893,7 +2189,7 @@ private struct LogPageCard: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Recent Calls")
                     .font(.system(size: 18, weight: .black, design: .rounded))
-                    .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                    .foregroundStyle(DetailCardPalette.primaryText)
 
                 ForEach(entries) { entry in
                     CallLogRow(entry: entry)
@@ -1904,47 +2200,107 @@ private struct LogPageCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 30, style: .continuous)
-                .fill(Color.white.opacity(0.78))
+                .fill(DetailCardPalette.cardFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 30, style: .continuous)
-                        .stroke(Color.white.opacity(0.58), lineWidth: 1)
+                        .stroke(DetailCardPalette.cardStroke, lineWidth: 1)
                 )
         )
         .shadow(color: Color.black.opacity(0.10), radius: 20, y: 10)
+        .environment(\.colorScheme, .light)
     }
 }
 
 private struct EmptyLogStateCard: View {
+    let onImportContact: () -> Void
     let onOpenSettings: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Add contacts before logging calls.")
                 .font(.system(size: 15, weight: .bold, design: .rounded))
-                .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                .foregroundStyle(DetailCardPalette.bodyText)
 
             Text("Your log only tracks people from your contact list so the check-ins stay intentional.")
                 .font(.system(size: 14, weight: .medium, design: .rounded))
-                .foregroundStyle(Color(red: 0.39, green: 0.49, blue: 0.54))
+                .foregroundStyle(DetailCardPalette.mutedText)
 
-            Button(action: onOpenSettings) {
-                Text("Open Settings")
-                    .font(.system(size: 14, weight: .black, design: .rounded))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(Color(red: 0.44, green: 0.58, blue: 0.94))
-                    )
+            HStack(spacing: 10) {
+                Button(action: onImportContact) {
+                    Label("Import", systemImage: "person.crop.circle.badge.plus")
+                        .font(.system(size: 14, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color(red: 0.12, green: 0.76, blue: 0.60))
+                        )
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onOpenSettings) {
+                    Text("Open Settings")
+                        .font(.system(size: 14, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color(red: 0.44, green: 0.58, blue: 0.94))
+                        )
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding(16)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.white.opacity(0.72))
+                .fill(DetailCardPalette.surfaceFill)
         )
+    }
+}
+
+private struct RecentLogShortcuts: View {
+    let entries: [CallLogEntry]
+    let onSelect: (CallLogEntry) -> Void
+
+    private var suggestions: [CallLogEntry] {
+        Array(entries.prefix(4))
+    }
+
+    var body: some View {
+        if !suggestions.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Use Recent")
+                    .font(.system(size: 14, weight: .black, design: .rounded))
+                    .foregroundStyle(DetailCardPalette.primaryText)
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                    ForEach(suggestions) { entry in
+                        Button(action: { onSelect(entry) }) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(entry.name)
+                                    .font(.system(size: 13, weight: .black, design: .rounded))
+                                    .foregroundStyle(DetailCardPalette.bodyText)
+                                    .lineLimit(1)
+
+                                Text("\(entry.minutes) min")
+                                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(DetailCardPalette.mutedText)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(DetailCardPalette.surfaceFill)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1956,7 +2312,7 @@ private struct ContactPickerField: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Contact")
                 .font(.system(size: 14, weight: .bold, design: .rounded))
-                .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                .foregroundStyle(DetailCardPalette.bodyText)
 
             Picker("Contact", selection: $selectedContactID) {
                 ForEach(contacts) { contact in
@@ -1964,12 +2320,14 @@ private struct ContactPickerField: View {
                 }
             }
             .pickerStyle(.menu)
+            .foregroundStyle(DetailCardPalette.bodyText)
+            .tint(DetailCardPalette.bodyText)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14)
             .padding(.vertical, 14)
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.white.opacity(0.88))
+                    .fill(DetailCardPalette.surfaceStrongFill)
             )
         }
     }
@@ -1982,17 +2340,18 @@ private struct SettingsPageCard: View {
     @Binding var notificationPreferences: NotificationPreferences
     @Binding var defaultCallMinutes: Int
     let onAddContact: () -> Void
+    let onImportContact: () -> Void
     let onDeleteContact: (AppContact) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Settings")
                 .font(.system(size: 30, weight: .black, design: .rounded))
-                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                .foregroundStyle(DetailCardPalette.primaryText)
 
             Text("Manage the people you track, how the app reminds you, and a few defaults that shape the logging flow.")
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(Color(red: 0.31, green: 0.45, blue: 0.50))
+                .foregroundStyle(DetailCardPalette.secondaryText)
 
             VStack(alignment: .leading, spacing: 12) {
                 SettingsSectionTitle(title: "Contacts")
@@ -2000,12 +2359,12 @@ private struct SettingsPageCard: View {
                 HStack(spacing: 10) {
                     TextField("Add a contact", text: $pendingContactName)
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                        .foregroundStyle(DetailCardPalette.bodyText)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 12)
                         .background(
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(Color.white.opacity(0.88))
+                                .fill(DetailCardPalette.surfaceStrongFill)
                         )
 
                     Button(action: onAddContact) {
@@ -2020,6 +2379,19 @@ private struct SettingsPageCard: View {
                     }
                     .buttonStyle(.plain)
                 }
+
+                Button(action: onImportContact) {
+                    Label("Import from iPhone Contacts", systemImage: "person.crop.circle.badge.plus")
+                        .font(.system(size: 14, weight: .black, design: .rounded))
+                        .foregroundStyle(DetailCardPalette.bodyText)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(DetailCardPalette.surfaceFill)
+                        )
+                }
+                .buttonStyle(.plain)
 
                 if contacts.isEmpty {
                     SettingsHint(text: "Add at least one contact to enable the call log.")
@@ -2042,19 +2414,20 @@ private struct SettingsPageCard: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Default call length: \(defaultCallMinutes) minute\(defaultCallMinutes == 1 ? "" : "s")")
                             .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                            .foregroundStyle(DetailCardPalette.bodyText)
 
                         Text("New log entries start from this value so you can save faster.")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(Color(red: 0.39, green: 0.49, blue: 0.54))
+                            .foregroundStyle(DetailCardPalette.mutedText)
                     }
                 }
+                .tint(DetailCardPalette.bodyText)
 
                 if !contacts.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Default contact")
                             .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                            .foregroundStyle(DetailCardPalette.bodyText)
 
                         Picker("Default contact", selection: $preferredContactID) {
                             ForEach(contacts) { contact in
@@ -2062,11 +2435,13 @@ private struct SettingsPageCard: View {
                             }
                         }
                         .pickerStyle(.menu)
+                        .foregroundStyle(DetailCardPalette.bodyText)
+                        .tint(DetailCardPalette.bodyText)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 14)
                         .background(
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(Color.white.opacity(0.88))
+                                .fill(DetailCardPalette.surfaceStrongFill)
                         )
                     }
                 }
@@ -2085,8 +2460,9 @@ private struct SettingsPageCard: View {
                     Stepper(value: $notificationPreferences.reminderHour, in: 0...23) {
                         Text("Reminder time: \(formattedHour(notificationPreferences.reminderHour))")
                             .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                            .foregroundStyle(DetailCardPalette.bodyText)
                     }
+                    .tint(DetailCardPalette.bodyText)
                 }
 
                 SettingsToggleRow(
@@ -2115,13 +2491,14 @@ private struct SettingsPageCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 30, style: .continuous)
-                .fill(Color.white.opacity(0.78))
+                .fill(DetailCardPalette.cardFill)
                 .overlay(
                     RoundedRectangle(cornerRadius: 30, style: .continuous)
-                        .stroke(Color.white.opacity(0.58), lineWidth: 1)
+                        .stroke(DetailCardPalette.cardStroke, lineWidth: 1)
                 )
         )
         .shadow(color: Color.black.opacity(0.10), radius: 20, y: 10)
+        .environment(\.colorScheme, .light)
     }
 
     private func formattedHour(_ hour: Int) -> String {
@@ -2138,7 +2515,7 @@ private struct SettingsSectionTitle: View {
     var body: some View {
         Text(title)
             .font(.system(size: 16, weight: .black, design: .rounded))
-            .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+            .foregroundStyle(DetailCardPalette.primaryText)
     }
 }
 
@@ -2148,7 +2525,7 @@ private struct SettingsHint: View {
     var body: some View {
         Text(text)
             .font(.system(size: 13, weight: .medium, design: .rounded))
-            .foregroundStyle(Color(red: 0.39, green: 0.49, blue: 0.54))
+            .foregroundStyle(DetailCardPalette.mutedText)
             .padding(.vertical, 6)
     }
 }
@@ -2169,7 +2546,7 @@ private struct ContactSettingsRow: View {
 
                     Text(contact.name)
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                        .foregroundStyle(DetailCardPalette.bodyText)
 
                     Spacer(minLength: 0)
 
@@ -2189,7 +2566,7 @@ private struct ContactSettingsRow: View {
                     .frame(width: 34, height: 34)
                     .background(
                         Circle()
-                            .fill(Color.white.opacity(0.76))
+                            .fill(DetailCardPalette.surfaceFill)
                     )
             }
             .buttonStyle(.plain)
@@ -2197,7 +2574,7 @@ private struct ContactSettingsRow: View {
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.white.opacity(0.72))
+                .fill(DetailCardPalette.surfaceFill)
         )
     }
 }
@@ -2212,17 +2589,18 @@ private struct SettingsToggleRow: View {
             Toggle(isOn: $isOn) {
                 Text(title)
                     .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                    .foregroundStyle(DetailCardPalette.bodyText)
             }
+            .tint(Color(red: 0.12, green: 0.76, blue: 0.60))
 
             Text(subtitle)
                 .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(Color(red: 0.39, green: 0.49, blue: 0.54))
+                .foregroundStyle(DetailCardPalette.mutedText)
         }
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.white.opacity(0.72))
+                .fill(DetailCardPalette.surfaceFill)
         )
     }
 }
@@ -2237,17 +2615,17 @@ private struct LogInputField: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.system(size: 14, weight: .bold, design: .rounded))
-                .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                .foregroundStyle(DetailCardPalette.bodyText)
 
             TextField(placeholder, text: $text)
                 .keyboardType(isNumeric ? .numberPad : .default)
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
-                .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                .foregroundStyle(DetailCardPalette.bodyText)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 14)
                 .background(
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color.white.opacity(0.88))
+                        .fill(DetailCardPalette.surfaceStrongFill)
                 )
         }
     }
@@ -2271,11 +2649,11 @@ private struct CallLogRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(entry.name)
                     .font(.system(size: 15, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                    .foregroundStyle(DetailCardPalette.bodyText)
 
                 Text("\(entry.minutes) minute\(entry.minutes == 1 ? "" : "s")")
                     .font(.system(size: 14, weight: .medium, design: .rounded))
-                    .foregroundStyle(Color(red: 0.39, green: 0.49, blue: 0.54))
+                    .foregroundStyle(DetailCardPalette.mutedText)
             }
 
             Spacer(minLength: 0)
@@ -2283,7 +2661,7 @@ private struct CallLogRow: View {
         .padding(14)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.white.opacity(0.72))
+                .fill(DetailCardPalette.surfaceFill)
         )
     }
 }
@@ -2299,7 +2677,7 @@ private struct DetailBullet: View {
 
             Text(text)
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
+                .foregroundStyle(DetailCardPalette.bodyText)
         }
     }
 }
