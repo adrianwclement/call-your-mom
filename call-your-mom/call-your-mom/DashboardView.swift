@@ -2907,6 +2907,7 @@ private struct DetailPageCard: View {
 
     private var upgradesSection: some View {
         VStack(alignment: .leading, spacing: 14) {
+            /*
             Text("Clothing")
                 .font(.system(size: 14, weight: .black, design: .rounded))
                 .foregroundStyle(DetailCardPalette.primaryText)
@@ -2935,6 +2936,7 @@ private struct DetailPageCard: View {
                     .buttonStyle(.plain)
                 }
             }
+            */
 
             Text("Dance Speed")
                 .font(.system(size: 14, weight: .black, design: .rounded))
