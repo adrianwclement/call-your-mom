@@ -147,6 +147,8 @@ struct DashboardView: View {
     @State private var lastLevelUpValue = 1
     @State private var isKeyboardVisible = false
     private let decayTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    private let minimumCallPromptDelay: TimeInterval = 45
+    private let stalePendingCallInterval: TimeInterval = 30 * 60
 
     private func loadSpriteLevels() {
         spriteLevels = LevelPersistence.load()
@@ -329,6 +331,7 @@ struct DashboardView: View {
             restorePersistedHealth()
             restoreSettings()
             restorePendingCallTracking()
+            clearPendingCallIfReturnedTooQuickly()
             refreshStreakDays()
             syncNotificationSchedules()
             presentPostCallPromptIfReady()
@@ -355,6 +358,7 @@ struct DashboardView: View {
                 restorePersistedHealth()
                 restoreSettings()
                 restorePendingCallTracking()
+                clearPendingCallIfReturnedTooQuickly()
                 presentPostCallPromptIfReady()
             } else if newValue == .background || newValue == .inactive {
                 persistHealthState()
@@ -423,7 +427,7 @@ struct DashboardView: View {
                 get: { postCallPrompt != nil },
                 set: { isPresented in
                     if !isPresented {
-                        postCallPrompt = nil
+                        clearPendingCallTracking()
                     }
                 }
             ),
@@ -443,7 +447,7 @@ struct DashboardView: View {
 
             Button("Later", role: .cancel) {
                 ButtonClickSound.perform {
-                    postCallPrompt = nil
+                    clearPendingCallTracking()
                 }
             }
         } message: { session in
@@ -902,9 +906,14 @@ struct DashboardView: View {
     private func presentPostCallPromptIfReady() {
         guard let session = pendingCallSession else { return }
 
+        if session.isStale(maxAge: stalePendingCallInterval) {
+            clearPendingCallTracking()
+            return
+        }
+
         let secondsSinceCallStarted = Date().timeIntervalSince(session.startedAt)
-        guard secondsSinceCallStarted >= 20 else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + (20 - secondsSinceCallStarted)) {
+        guard secondsSinceCallStarted >= minimumCallPromptDelay else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + (minimumCallPromptDelay - secondsSinceCallStarted)) {
                 guard scenePhase == .active else { return }
                 presentPostCallPromptIfReady()
             }
@@ -932,6 +941,17 @@ struct DashboardView: View {
         return max(1, elapsedMinutes == 0 ? session.fallbackMinutes : elapsedMinutes)
     }
 
+    private func clearPendingCallIfReturnedTooQuickly() {
+        guard
+            let session = pendingCallSession,
+            Date().timeIntervalSince(session.startedAt) < 12
+        else {
+            return
+        }
+
+        clearPendingCallTracking()
+    }
+
     private func clearPendingCallTracking() {
         pendingCallSession = nil
         postCallPrompt = nil
@@ -941,7 +961,13 @@ struct DashboardView: View {
 
     private func restorePendingCallTracking() {
         guard pendingCallSession == nil else { return }
-        pendingCallSession = PendingCallPersistence.load()
+        guard let restoredSession = PendingCallPersistence.load() else { return }
+
+        if restoredSession.isStale(maxAge: stalePendingCallInterval) {
+            PendingCallPersistence.clear()
+        } else {
+            pendingCallSession = restoredSession
+        }
     }
 
     private func persistPendingCallTracking() {
@@ -1247,6 +1273,10 @@ private struct PendingCallSession: Codable, Identifiable {
         self.contactName = contactName
         self.startedAt = startedAt
         self.fallbackMinutes = fallbackMinutes
+    }
+
+    func isStale(maxAge: TimeInterval, now: Date = Date()) -> Bool {
+        now.timeIntervalSince(startedAt) > maxAge
     }
 }
 
