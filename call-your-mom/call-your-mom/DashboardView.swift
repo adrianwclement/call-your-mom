@@ -39,6 +39,8 @@ struct DashboardView: View {
     @State private var isContactPickerPresented = false
     @State private var pendingCallSession: PendingCallSession?
     @State private var postCallPrompt: PendingCallSession?
+    @State private var isWalkthroughPresented = false
+    @State private var walkthroughIndex = 0
     @State private var isGameMode = false
     @State private var isLaunchingGame = false
     @State private var gameEntryProgress: CGFloat = 0
@@ -60,6 +62,8 @@ struct DashboardView: View {
             let showingGame = activePage == .home && (isGameMode || isLaunchingGame)
 
             ZStack {
+                AppSkyBackground(theme: selectedTheme)
+
                 AppSceneBackground(theme: selectedTheme)
 
                 if showingGame {
@@ -72,6 +76,8 @@ struct DashboardView: View {
                         onExit: exitGameMode
                     )
                     .allowsHitTesting(isGameMode)
+                    .opacity(isLaunchingGame ? gameEntryProgress : 1)
+                    .scaleEffect(isLaunchingGame ? 0.96 + (gameEntryProgress * 0.04) : 1)
                     .zIndex(0)
                 }
 
@@ -87,6 +93,7 @@ struct DashboardView: View {
                             }
                         },
                         onBack: goBack,
+                        onWalkthrough: restartWalkthrough,
                         onInbox: { navigate(to: .inbox) }
                     )
                     .padding(.top, metrics.topPadding)
@@ -119,12 +126,28 @@ struct DashboardView: View {
                     .allowsHitTesting(false)
                     .zIndex(2)
                 }
+
+                if isWalkthroughPresented && !showingGame {
+                    WalkthroughOverlay(
+                        metrics: metrics,
+                        step: WalkthroughStep.allCases[walkthroughIndex],
+                        currentIndex: walkthroughIndex,
+                        totalCount: WalkthroughStep.allCases.count,
+                        onNext: advanceWalkthrough,
+                        onSkip: finishWalkthrough
+                    )
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    .zIndex(4)
+                }
+
             }
             .safeAreaInset(edge: .bottom) {
                 if !showingGame {
                     ActionDock(
                         activePage: $activePage,
                         metrics: metrics,
+                        isTutorialActive: isWalkthroughPresented,
+                        tutorialTarget: isWalkthroughPresented ? WalkthroughStep.allCases[walkthroughIndex].dockTarget : nil,
                         onLogTap: { navigate(to: .log) },
                         onSelectPage: navigate
                     )
@@ -140,6 +163,12 @@ struct DashboardView: View {
                         .ignoresSafeArea()
                     )
                     .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transaction { transaction in
+                        if isWalkthroughPresented {
+                            transaction.animation = nil
+                        }
+                    }
+                    .allowsHitTesting(!isWalkthroughPresented)
                 }
             }
             .ignoresSafeArea()
@@ -156,6 +185,7 @@ struct DashboardView: View {
             refreshStreakDays()
             syncNotificationSchedules()
             presentPostCallPromptIfReady()
+            startWalkthroughIfNeeded()
         }
         .onReceive(decayTimer) { _ in
             guard scenePhase == .active else { return }
@@ -266,7 +296,11 @@ struct DashboardView: View {
                                 .transition(.move(edge: .top).combined(with: .opacity))
                         }
 
-                        FloatingHealthBar(health: health, isAnimating: healthPulse)
+                        FloatingHealthBar(
+                            health: health,
+                            isAnimating: healthPulse,
+                            isTutorialHighlighted: isWalkthroughPresented && WalkthroughStep.allCases[walkthroughIndex].focus == .healthBar
+                        )
 
                         IntegratedTamagotchiStage(
                             health: health,
@@ -748,6 +782,54 @@ struct DashboardView: View {
         activePage = page
     }
 
+    private func startWalkthroughIfNeeded() {
+        guard !WalkthroughPersistence.hasCompleted else { return }
+        guard !isWalkthroughPresented else { return }
+
+        walkthroughIndex = 0
+        showWalkthroughStep(at: walkthroughIndex)
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
+            isWalkthroughPresented = true
+        }
+    }
+
+    private func restartWalkthrough() {
+        guard !isWalkthroughPresented else { return }
+
+        walkthroughIndex = 0
+        showWalkthroughStep(at: walkthroughIndex)
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
+            isWalkthroughPresented = true
+        }
+    }
+
+    private func advanceWalkthrough() {
+        let nextIndex = walkthroughIndex + 1
+        guard nextIndex < WalkthroughStep.allCases.count else {
+            finishWalkthrough()
+            return
+        }
+
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+            walkthroughIndex = nextIndex
+            showWalkthroughStep(at: nextIndex)
+        }
+    }
+
+    private func finishWalkthrough() {
+        WalkthroughPersistence.markCompleted()
+        withAnimation(.easeInOut(duration: 0.2)) {
+            isWalkthroughPresented = false
+        }
+    }
+
+    private func showWalkthroughStep(at index: Int) {
+        guard WalkthroughStep.allCases.indices.contains(index) else { return }
+        pageHistory.removeAll()
+        activePage = .home
+        activeHomePanelIndex = 1
+    }
+
     private func goBack() {
         if isGameMode {
             exitGameMode()
@@ -765,12 +847,17 @@ struct DashboardView: View {
     private func enterGameMode() {
         guard activePage == .home, !isGameMode, !isLaunchingGame else { return }
         quickActionsExpanded = false
-        isLaunchingGame = true
         gameEntryProgress = 0
-        withAnimation(.spring(response: 0.56, dampingFraction: 0.88)) {
+
+        withAnimation(.spring(response: 0.52, dampingFraction: 0.88)) {
+            isLaunchingGame = true
+        }
+
+        withAnimation(.spring(response: 0.58, dampingFraction: 0.86)) {
             gameEntryProgress = 1
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.48) {
             guard isLaunchingGame else { return }
             isGameMode = true
             isLaunchingGame = false
@@ -866,6 +953,286 @@ private enum PendingCallPersistence {
     }
 }
 
+private enum WalkthroughPersistence {
+    private static let storageKey = "walkthrough.hasCompleted"
+
+    static var hasCompleted: Bool {
+        UserDefaults.standard.bool(forKey: storageKey)
+    }
+
+    static func markCompleted() {
+        UserDefaults.standard.set(true, forKey: storageKey)
+    }
+}
+
+private enum WalkthroughStep: CaseIterable, Identifiable {
+    case welcome
+    case health
+    case logCall
+    case contacts
+    case upgrades
+    case garden
+
+    var id: Self { self }
+
+    var dockTarget: HomePage? {
+        switch self {
+        case .welcome, .health, .garden:
+            return nil
+        case .logCall:
+            return .log
+        case .contacts:
+            return .settings
+        case .upgrades:
+            return .upgrades
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .welcome:
+            return "heart.fill"
+        case .health:
+            return "waveform.path.ecg"
+        case .logCall:
+            return "phone.badge.plus.fill"
+        case .contacts:
+            return "person.crop.circle.badge.plus"
+        case .upgrades:
+            return "sparkles"
+        case .garden:
+            return "arrow.left.and.right"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .welcome:
+            return "Welcome to Call Your Mom"
+        case .health:
+            return "Keep Health High"
+        case .logCall:
+            return "Log Calls Fast"
+        case .contacts:
+            return "Add Your People"
+        case .upgrades:
+            return "Customize and Streak"
+        case .garden:
+            return "Swipe Through Your Garden"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .welcome:
+            return "Your Tamagotchi stays healthy when you make time for real calls."
+        case .health:
+            return "The health bar changes color as it drops. Logging a call heals your companion."
+        case .logCall:
+            return "Use the Log tab to save a call, reuse recent entries, or call an imported contact."
+        case .contacts:
+            return "Settings lets you import iPhone contacts, choose a default person, and tune reminders."
+        case .upgrades:
+            return "Upgrades change style and show your streak tier. Streaks rise only when calls are logged on consecutive days."
+        case .garden:
+            return "On Home, swipe right to select your current sprite or swipe left to view all of your sprites hanging out in the garden."
+        }
+    }
+
+    var dimOpacity: Double {
+        focus == .healthBar ? 0.12 : 0.34
+    }
+
+    var focus: WalkthroughFocus {
+        switch self {
+        case .welcome, .garden:
+            return .center
+        case .health:
+            return .healthBar
+        case .logCall, .contacts, .upgrades:
+            return .dock
+        }
+    }
+}
+
+private enum WalkthroughFocus {
+    case center
+    case healthBar
+    case dock
+}
+
+private struct WalkthroughOverlay: View {
+    let metrics: LayoutMetrics
+    let step: WalkthroughStep
+    let currentIndex: Int
+    let totalCount: Int
+    let onNext: () -> Void
+    let onSkip: () -> Void
+    private let tutorialCardYOffset: CGFloat = 22
+
+    private var isLastStep: Bool {
+        currentIndex == totalCount - 1
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.opacity(step.dimOpacity)
+                    .ignoresSafeArea()
+
+                switch step.focus {
+                case .center:
+                    card
+                        .padding(.horizontal, 22)
+                        .position(
+                            x: geometry.size.width / 2,
+                            y: (geometry.size.height / 2) + tutorialCardYOffset
+                        )
+
+                case .healthBar:
+                    VStack(spacing: 10) {
+                        Spacer()
+                            .frame(height: metrics.topPadding + metrics.topButtonSize + metrics.sectionSpacing + 20)
+
+                        healthPointer
+                            .padding(.horizontal, 22)
+
+                        card
+                            .padding(.horizontal, 22)
+
+                        Spacer()
+                    }
+                    .offset(y: tutorialCardYOffset)
+
+                case .dock:
+                    VStack(spacing: 8) {
+                        Spacer()
+
+                        card
+                            .padding(.horizontal, 22)
+
+                        dockPointer
+                            .padding(.horizontal, 22)
+                            .padding(.bottom, 42)
+                    }
+                    .offset(y: tutorialCardYOffset)
+                }
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+    }
+
+    private var healthPointer: some View {
+        GeometryReader { geometry in
+            Triangle()
+                .fill(DetailCardPalette.cardFill)
+                .frame(width: 26, height: 18)
+                .shadow(color: Color.black.opacity(0.16), radius: 6, y: 4)
+                .position(x: geometry.size.width / 2, y: 9)
+        }
+        .frame(height: 18)
+    }
+
+    private var dockPointer: some View {
+        GeometryReader { geometry in
+            let targetCenter = pointerCenterX(in: geometry.size.width)
+
+            Triangle()
+                .fill(DetailCardPalette.cardFill)
+                .frame(width: 26, height: 18)
+                .rotationEffect(.degrees(180))
+                .shadow(color: Color.black.opacity(0.16), radius: 6, y: 4)
+                .position(x: targetCenter, y: 9)
+        }
+        .frame(height: 18)
+    }
+
+    private func pointerCenterX(in width: CGFloat) -> CGFloat {
+        guard
+            let dockTarget = step.dockTarget,
+            let targetIndex = HomePage.dockCases.firstIndex(of: dockTarget)
+        else {
+            return width / 2
+        }
+
+        let segmentWidth = width / CGFloat(HomePage.dockCases.count)
+        return segmentWidth * (CGFloat(targetIndex) + 0.5)
+    }
+
+    private var card: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(systemName: step.symbol)
+                    .font(.system(size: 18, weight: .black))
+                    .foregroundStyle(.white)
+                    .frame(width: 42, height: 42)
+                    .background(
+                        Circle()
+                            .fill(Color(red: 0.11, green: 0.64, blue: 0.57))
+                    )
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Step \(currentIndex + 1) of \(totalCount)")
+                        .font(.system(size: 11, weight: .black, design: .rounded))
+                        .foregroundStyle(DetailCardPalette.mutedText)
+
+                    Text(step.title)
+                        .font(.system(size: 20, weight: .black, design: .rounded))
+                        .foregroundStyle(DetailCardPalette.primaryText)
+                }
+            }
+
+            Text(step.message)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(DetailCardPalette.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                ForEach(0..<totalCount, id: \.self) { index in
+                    Capsule()
+                        .fill(index == currentIndex ? Color(red: 0.11, green: 0.64, blue: 0.57) : Color(red: 0.74, green: 0.80, blue: 0.82))
+                        .frame(width: index == currentIndex ? 24 : 8, height: 8)
+                }
+            }
+
+            HStack(spacing: 12) {
+                Button(action: onSkip) {
+                    Text("Skip")
+                        .font(.system(size: 14, weight: .black, design: .rounded))
+                        .foregroundStyle(DetailCardPalette.mutedText)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 13)
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onNext) {
+                    Text(isLastStep ? "Start" : "Next")
+                        .font(.system(size: 15, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 13)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(Color(red: 0.12, green: 0.76, blue: 0.60))
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(DetailCardPalette.cardFill)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .stroke(DetailCardPalette.cardStroke, lineWidth: 1)
+                )
+        )
+        .shadow(color: Color.black.opacity(0.24), radius: 24, y: 14)
+    }
+}
+
 private extension String {
     var digitsOnly: String {
         filter(\.isNumber)
@@ -911,6 +1278,19 @@ private struct LayoutMetrics {
         contentBottomPadding = (tinyHeight ? 136 : 150) + dockOuterBottomPadding
         cardCornerRadius = tinyHeight ? 24 : 30
         minContentHeight = container.height - safeArea.top
+    }
+}
+
+private struct AppSkyBackground: View {
+    let theme: AppTheme
+
+    var body: some View {
+        LinearGradient(
+            colors: [theme.primary, theme.secondary, theme.tertiary],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .ignoresSafeArea()
     }
 }
 
@@ -972,6 +1352,7 @@ private struct HomeTopBar: View {
     let hasNotifications: Bool
     let onTitleTap: () -> Void
     let onBack: () -> Void
+    let onWalkthrough: () -> Void
     let onInbox: () -> Void
 
     var body: some View {
@@ -979,8 +1360,7 @@ private struct HomeTopBar: View {
             if isBackVisible {
                 CircularIconButton(systemName: "arrow.left", diameter: metrics.topButtonSize, iconSize: metrics.topIconSize, showDot: false, action: onBack)
             } else {
-                Color.clear
-                    .frame(width: metrics.topButtonSize, height: metrics.topButtonSize)
+                CircularIconButton(systemName: "info.circle.fill", diameter: metrics.topButtonSize, iconSize: metrics.topIconSize, showDot: false, action: onWalkthrough)
             }
 
             Spacer()
@@ -1007,6 +1387,7 @@ private struct HomeTopBar: View {
 private struct FloatingHealthBar: View {
     let health: Double
     let isAnimating: Bool
+    var isTutorialHighlighted = false
 
     private var clampedHealth: Double {
         min(max(health, 0), 100)
@@ -1047,7 +1428,6 @@ private struct FloatingHealthBar: View {
                 Capsule()
                     .fill(Color.white.opacity(0.40))
                     .frame(height: 14)
-
                 Capsule()
                     .fill(
                         LinearGradient(
@@ -1056,15 +1436,43 @@ private struct FloatingHealthBar: View {
                             endPoint: .trailing
                         )
                     )
-                    .frame(width: max(28, geometry.size.width * (clampedHealth / 100)), height: 14)
+                    .frame(
+                        width: max(28, geometry.size.width * (clampedHealth / 100)),
+                        height: 14
+                    )
+                    .overlay {
+                        if isTutorialHighlighted {
+                            Capsule()
+                                .fill(Color.white.opacity(0.16))
+                                .blendMode(.plusLighter)
+                        }
+                    }
                     .scaleEffect(x: 1, y: isAnimating ? 1.03 : 0.97, anchor: .center)
                     .shadow(color: glowColor.opacity(0.24), radius: isAnimating ? 8 : 4)
                     .animation(.easeInOut(duration: 0.8), value: isAnimating)
                     .animation(.easeInOut(duration: 0.45), value: health)
             }
+            .frame(width: geometry.size.width, height: 14)
+            .background {
+                if isTutorialHighlighted {
+                    Capsule()
+                        .fill(Color.white.opacity(0.18))
+                        .frame(
+                            width: geometry.size.width + 12,
+                            height: 30
+                        )
+                        .overlay(
+                            Capsule()
+                                .stroke(Color.white.opacity(0.92), lineWidth: 3)
+                        )
+                        .shadow(color: Color.white.opacity(0.45), radius: 10)
+                }
+            }
+            .frame(width: geometry.size.width, height: 30, alignment: .center)
         }
-        .frame(height: 14)
-        .padding(.horizontal, 8)
+        .frame(height: isTutorialHighlighted ? 30 : 14)
+        .padding(.horizontal, 2)
+        .animation(.easeInOut(duration: 0.2), value: isTutorialHighlighted)
     }
 }
 
@@ -1601,12 +2009,6 @@ private struct FlappyTamagotchiGameView: View {
             let sceneSize = sceneFrame.size
 
             ZStack(alignment: .top) {
-                LinearGradient(
-                    colors: [Color.white.opacity(0.06), Color.black.opacity(0.04), Color.clear],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-
                 ForEach(pipes) { pipe in
                     FlappyPipeView(pipe: pipe, size: sceneSize, tint: theme.pipeColor)
                 }
@@ -2761,6 +3163,8 @@ private struct InboxRow: View {
 private struct ActionDock: View {
     @Binding var activePage: HomePage
     let metrics: LayoutMetrics
+    let isTutorialActive: Bool
+    let tutorialTarget: HomePage?
     let onLogTap: () -> Void
     let onSelectPage: (HomePage) -> Void
 
@@ -2770,6 +3174,8 @@ private struct ActionDock: View {
                 DockButton(
                     page: page,
                     isSelected: activePage == page,
+                    isTutorialHighlighted: tutorialTarget == page,
+                    isTutorialDimmed: isTutorialActive && tutorialTarget != page,
                     metrics: metrics,
                     onTap: {
                         if page == .log {
@@ -2787,19 +3193,21 @@ private struct ActionDock: View {
         .frame(maxWidth: .infinity)
         .background(
             RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .fill(Color.white.opacity(0.86))
+                .fill(Color.white.opacity(isTutorialActive ? 0.58 : 0.86))
                 .overlay(
                     RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .stroke(Color.white.opacity(0.60), lineWidth: 1)
+                        .stroke(Color.white.opacity(isTutorialActive ? 0.34 : 0.60), lineWidth: 1)
                 )
         )
-        .shadow(color: Color.black.opacity(0.10), radius: 18, y: 10)
+        .shadow(color: Color.black.opacity(isTutorialActive ? 0.06 : 0.10), radius: 18, y: 10)
     }
 }
 
 private struct DockButton: View {
     let page: HomePage
     let isSelected: Bool
+    let isTutorialHighlighted: Bool
+    let isTutorialDimmed: Bool
     let metrics: LayoutMetrics
     let onTap: () -> Void
 
@@ -2808,27 +3216,58 @@ private struct DockButton: View {
             VStack(spacing: 8) {
                 ZStack {
                     Circle()
-                        .fill(isSelected ? page.highlightColor : .white)
+                        .fill(dockCircleFill)
                         .frame(
                             width: isSelected ? metrics.dockSelectedSize : metrics.dockButtonSize,
                             height: isSelected ? metrics.dockSelectedSize : metrics.dockButtonSize
                         )
+                        .overlay(
+                            Circle()
+                                .stroke(Color.white.opacity(isTutorialHighlighted ? 0.96 : 0), lineWidth: 4)
+                                .scaleEffect(1.12)
+                        )
+                        .shadow(color: Color.white.opacity(isTutorialHighlighted ? 0.45 : 0), radius: 16)
 
                     Image(systemName: page.symbol)
                         .font(.system(size: isSelected ? 22 : 19, weight: .bold))
-                        .foregroundStyle(isSelected ? .white : Color(red: 0.11, green: 0.18, blue: 0.29))
+                        .foregroundStyle(symbolColor)
                 }
 
                 Text(page.label)
                     .font(.system(size: metrics.dockLabelSize, weight: .bold, design: .rounded))
-                    .foregroundStyle(isSelected ? Color(red: 0.09, green: 0.16, blue: 0.26) : Color(red: 0.34, green: 0.44, blue: 0.50))
+                    .foregroundStyle(labelColor)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
+            .opacity(isTutorialDimmed ? 0.34 : 1)
         }
         .buttonStyle(.plain)
+    }
+
+    private var dockCircleFill: Color {
+        if isTutorialDimmed {
+            return Color(red: 0.78, green: 0.82, blue: 0.85).opacity(0.50)
+        }
+
+        return isSelected ? page.highlightColor : .white
+    }
+
+    private var symbolColor: Color {
+        if isTutorialDimmed {
+            return Color(red: 0.44, green: 0.49, blue: 0.53)
+        }
+
+        return isSelected ? .white : Color(red: 0.11, green: 0.18, blue: 0.29)
+    }
+
+    private var labelColor: Color {
+        if isTutorialDimmed {
+            return Color(red: 0.48, green: 0.53, blue: 0.56)
+        }
+
+        return isSelected ? Color(red: 0.09, green: 0.16, blue: 0.26) : Color(red: 0.34, green: 0.44, blue: 0.50)
     }
 }
 
