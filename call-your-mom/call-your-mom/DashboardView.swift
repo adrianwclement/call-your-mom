@@ -284,7 +284,7 @@ struct DashboardView: View {
                         isTutorialActive: isWalkthroughPresented,
                         tutorialTarget: isWalkthroughPresented ? WalkthroughStep.allCases[walkthroughIndex].dockTarget : nil,
                         onLogTap: { navigate(to: .log) },
-                        onSelectPage: navigate
+                        onSelectPage: handleDockSelection
                     )
                     .padding(.horizontal, metrics.horizontalPadding)
                     .padding(.top, 8)
@@ -1128,6 +1128,29 @@ struct DashboardView: View {
         guard page != activePage else { return }
         pageHistory.append(activePage)
         activePage = page
+    }
+
+    private func handleDockSelection(_ page: HomePage) {
+        if page == .home {
+            resetHomeScreen()
+        } else {
+            navigate(to: page)
+        }
+    }
+
+    private func resetHomeScreen() {
+        if isGameMode || isLaunchingGame {
+            exitGameMode()
+        }
+
+        pageHistory.removeAll()
+        quickActionsExpanded = false
+        homeDragTranslation = 0
+
+        withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.86, blendDuration: 0.12)) {
+            activePage = .home
+            activeHomePanelIndex = 1
+        }
     }
 
     private func startWalkthroughIfNeeded() {
