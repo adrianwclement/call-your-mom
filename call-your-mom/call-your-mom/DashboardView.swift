@@ -51,7 +51,43 @@ struct DashboardView: View {
     @State private var gameEntryProgress: CGFloat = 0
     @State private var activeHomePanelIndex = 1
     @State private var homeDragTranslation: CGFloat = 0
+    @State private var spriteLevels: [String: SpriteLevel] = [:]
+    @State private var currentSpriteLevel: SpriteLevel = SpriteLevel(spriteID: "default")
+    @State private var showLevelUpNotification = false
+    @State private var lastLevelUpValue = 1
     private let decayTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private func loadSpriteLevels() {
+        spriteLevels = LevelPersistence.load()
+        updateCurrentSpriteLevel()
+    }
+
+    private func updateCurrentSpriteLevel() {
+        currentSpriteLevel = spriteLevels[selectedSprite.id] ?? SpriteLevel(spriteID: selectedSprite.id)
+    }
+
+    private func saveCurrentSpriteLevel() {
+        spriteLevels[currentSpriteLevel.spriteID] = currentSpriteLevel
+        LevelPersistence.save(spriteLevels)
+    }
+
+    private func awardExperienceForCall(minutes: Int) {
+        let xpGain = LevelCalculator.calculateExperienceGain(
+            callMinutes: minutes,
+            currentStreak: streakDays,
+            healthPercent: health
+        )
+        
+        let didLevelUp = currentSpriteLevel.addExperience(xpGain)
+        saveCurrentSpriteLevel()
+        
+        if didLevelUp {
+            lastLevelUpValue = currentSpriteLevel.level
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                showLevelUpNotification = true
+            }
+        }
+    }
 
     private var notifications: [InboxItem] {
         buildNotifications()
@@ -192,6 +228,7 @@ struct DashboardView: View {
             syncNotificationSchedules()
             presentPostCallPromptIfReady()
             startWalkthroughIfNeeded()
+            loadSpriteLevels()
         }
         .onReceive(decayTimer) { _ in
             guard scenePhase == .active else { return }
@@ -221,6 +258,7 @@ struct DashboardView: View {
         }
         .onChange(of: selectedSprite) { _, _ in
             AppStatePersistence.saveSelectedSpriteID(selectedSprite.id)
+            updateCurrentSpriteLevel()
         }
         .onChange(of: contacts) { _, _ in
             sanitizeContactsAfterMutation()
@@ -317,16 +355,16 @@ struct DashboardView: View {
             let currentOffset = min(max(baseOffset - homeDragTranslation, 0), panelWidth * 2)
 
             HStack(spacing: 0) {
-                SpriteSelectionGridView(
-                    sprites: availableSprites,
-                    selectedSprite: selectedSprite,
-                    selectedClothing: selectedClothing,
-                    health: health,
-                    selectedDanceSpeed: selectedDanceSpeed,
-                    onSelectSprite: { sprite in
-                        selectedSprite = sprite
-                    }
-                )
+            SpriteSelectionGridView(
+                sprites: availableSprites,
+                selectedSprite: selectedSprite,
+                selectedClothing: selectedClothing,
+                health: health,
+                selectedDanceSpeed: selectedDanceSpeed,
+                onSelectSprite: { sprite in
+                    selectedSprite = sprite
+                }, spriteLevels: spriteLevels
+            )
                 .padding(.horizontal, metrics.horizontalPadding)
                 .padding(.bottom, metrics.contentBottomPadding)
                 .frame(width: panelWidth)
@@ -354,6 +392,7 @@ struct DashboardView: View {
                             sprite: selectedSprite,
                             clothing: selectedClothing,
                             danceSpeed: selectedDanceSpeed,
+                            currentSpriteLevel: currentSpriteLevel,
                             isGameMode: isShowingGame,
                             hidesSprite: isLaunchingGame,
                             onLaunchGame: enterGameMode
@@ -427,6 +466,7 @@ struct DashboardView: View {
         logMinutes = String(defaultCallMinutes)
         lastHealthUpdatedAt = Date()
         clearPendingCallTracking()
+        awardExperienceForCall(minutes: minutes)
     }
 
     private func applyElapsedDecay(now: Date) {
@@ -1830,6 +1870,7 @@ private struct IntegratedTamagotchiStage: View {
     let sprite: TamagotchiSpriteProfile
     let clothing: ClothingOption
     let danceSpeed: DanceSpeed
+    let currentSpriteLevel: SpriteLevel
     let isGameMode: Bool
     let hidesSprite: Bool
     let onLaunchGame: () -> Void
@@ -1841,7 +1882,9 @@ private struct IntegratedTamagotchiStage: View {
                     health: health,
                     sprite: sprite,
                     clothing: clothing,
-                    danceSpeed: danceSpeed
+                    danceSpeed: danceSpeed,
+                    level: currentSpriteLevel,
+                    showLevel: true
                 )
                 .offset(y: 50)
             }
@@ -1888,6 +1931,7 @@ private struct SpriteSelectionGridView: View {
     let health: Double
     let selectedDanceSpeed: DanceSpeed
     let onSelectSprite: (TamagotchiSpriteProfile) -> Void
+    let spriteLevels: [String: SpriteLevel]
 
     private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
 
@@ -1909,7 +1953,10 @@ private struct SpriteSelectionGridView: View {
                                     artSize: 96,
                                     showsLabels: false,
                                     showsBadge: false,
-                                    danceSpeed: selectedDanceSpeed
+                                    danceSpeed: selectedDanceSpeed,
+                                    level: spriteLevels[sprite.id],
+                                    showLevel: false,
+                                    showsLevelProgress: false
                                 )
                                 Text(sprite.displayName)
                                     .font(.system(size: 13, weight: .bold, design: .rounded))
@@ -2088,9 +2135,13 @@ private struct PixelTamagotchi: View {
     var showsLabels: Bool = true
     var showsBadge: Bool = true
     var danceSpeed: DanceSpeed = .normal
+    var level: SpriteLevel? = nil
+    var showLevel: Bool = false
+    var showsLevelProgress: Bool = true
 
     var body: some View {
         VStack(spacing: showsLabels ? 10 : 0) {
+        
             ZStack(alignment: .topTrailing) {
                 if let atlas = sprite.atlas {
                     TimelineView(.animation(minimumInterval: frameInterval(for: atlas), paused: false)) { context in
@@ -2107,11 +2158,13 @@ private struct PixelTamagotchi: View {
                     fallbackPixelSprite
                 }
 
-                if showsBadge {
-                    Image(systemName: sprite.badgeSymbol)
-                        .font(.system(size: max(12, artSize * 0.11), weight: .black))
-                        .foregroundStyle(sprite.badgeColor)
-                        .offset(x: -8, y: 6)
+                if showLevel, let level = level {
+                    PixelLevelBadge(
+                        level: level.level,
+                        experienceProgress: level.progressToNextLevel(),
+                        showsProgress: showsLevelProgress
+                    )
+                    .offset(x: -8, y: 6)
                 }
             }
 
@@ -4078,6 +4131,108 @@ private enum HomePage: CaseIterable {
             return Color(red: 0.12, green: 0.76, blue: 0.60)
         case .inbox:
             return Color(red: 0.97, green: 0.58, blue: 0.42)
+        }
+    }
+}
+
+private struct SpriteLevel: Codable, Equatable {
+    let spriteID: String
+    var level: Int
+    var experienceInLevel: Int
+
+    init(spriteID: String, level: Int = 1, experienceInLevel: Int = 0) {
+        self.spriteID = spriteID
+        self.level = max(1, level)
+        self.experienceInLevel = max(0, experienceInLevel)
+        normalize()
+    }
+
+    mutating func addExperience(_ amount: Int) -> Bool {
+        guard amount > 0 else { return false }
+
+        let startingLevel = level
+        experienceInLevel += amount
+        normalize()
+        return level > startingLevel
+    }
+
+    func progressToNextLevel() -> Double {
+        let required = Double(experienceForNextLevel())
+        guard required > 0 else { return 1 }
+        return min(max(Double(experienceInLevel) / required, 0), 1)
+    }
+
+    private mutating func normalize() {
+        while experienceInLevel >= experienceForNextLevel() {
+            experienceInLevel -= experienceForNextLevel()
+            level += 1
+        }
+    }
+
+    private func experienceForNextLevel() -> Int {
+        // Gradual, predictable curve: 100, 130, 160, ...
+        100 + max(0, (level - 1) * 30)
+    }
+}
+
+private enum LevelCalculator {
+    static func calculateExperienceGain(callMinutes: Int, currentStreak: Int, healthPercent: Double) -> Int {
+        let durationXP = max(5, callMinutes) * 10
+        let streakMultiplier = 1.0 + (Double(min(max(currentStreak, 0), 14)) * 0.03)
+        let lowHealthBonus = healthPercent < 35 ? 20 : 0
+        return Int((Double(durationXP) * streakMultiplier).rounded()) + lowHealthBonus
+    }
+}
+
+private enum LevelPersistence {
+    private static let storageKey = "sprite.levels"
+
+    static func load() -> [String: SpriteLevel] {
+        guard
+            let data = UserDefaults.standard.data(forKey: storageKey),
+            let levels = try? JSONDecoder().decode([String: SpriteLevel].self, from: data)
+        else {
+            return [:]
+        }
+
+        return levels
+    }
+
+    static func save(_ levels: [String: SpriteLevel]) {
+        guard let encoded = try? JSONEncoder().encode(levels) else { return }
+        UserDefaults.standard.set(encoded, forKey: storageKey)
+    }
+}
+
+private struct PixelLevelBadge: View {
+    let level: Int
+    let experienceProgress: Double
+    var showsProgress: Bool = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("LV \(level)")
+                .font(.system(size: 11, weight: .black, design: .rounded))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color.black.opacity(0.75))
+                )
+
+            if showsProgress {
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        Capsule(style: .continuous)
+                            .fill(Color.black.opacity(0.25))
+                        Capsule(style: .continuous)
+                            .fill(Color(red: 0.30, green: 0.84, blue: 0.54))
+                            .frame(width: geometry.size.width * experienceProgress)
+                    }
+                }
+                .frame(width: 44, height: 5)
+            }
         }
     }
 }
