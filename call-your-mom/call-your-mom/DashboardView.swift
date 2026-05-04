@@ -199,6 +199,7 @@ struct DashboardView: View {
                 AppSkyBackground(theme: selectedTheme)
 
                 AppSceneBackground(theme: selectedTheme)
+                    .offset(y: -metrics.backgroundSceneLift)
 
                 if showingGame {
                     FlappyTamagotchiGameView(
@@ -1450,6 +1451,10 @@ private struct WalkthroughOverlay: View {
     let onSkip: () -> Void
     private let tutorialCardYOffset: CGFloat = 22
 
+    private var dockPointerBottomPadding: CGFloat {
+        72 + metrics.dockOuterBottomPadding + metrics.dockInnerBottomPadding + metrics.dockSelectedSize
+    }
+
     private var isLastStep: Bool {
         currentIndex == totalCount - 1
     }
@@ -1493,7 +1498,7 @@ private struct WalkthroughOverlay: View {
 
                         dockPointer
                             .padding(.horizontal, 22)
-                            .padding(.bottom, 42)
+                            .padding(.bottom, dockPointerBottomPadding)
                     }
                     .offset(y: tutorialCardYOffset)
                 }
@@ -1634,6 +1639,7 @@ private struct LayoutMetrics {
     let dockInnerBottomPadding: CGFloat
     let dockOuterBottomPadding: CGFloat
     let contentBottomPadding: CGFloat
+    let backgroundSceneLift: CGFloat
     let cardCornerRadius: CGFloat
     let minContentHeight: CGFloat
 
@@ -1656,6 +1662,7 @@ private struct LayoutMetrics {
         dockInnerBottomPadding = tinyHeight ? 10 : 14
         dockOuterBottomPadding = max(safeArea.bottom, tinyHeight ? 8 : 12)
         contentBottomPadding = (tinyHeight ? 136 : 150) + dockOuterBottomPadding
+        backgroundSceneLift = tinyHeight ? 136 : 150
         cardCornerRadius = tinyHeight ? 24 : 30
         minContentHeight = container.height - safeArea.top
     }
