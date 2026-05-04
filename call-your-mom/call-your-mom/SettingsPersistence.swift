@@ -22,10 +22,61 @@ struct AppContact: Codable, Identifiable, Hashable {
 struct NotificationPreferences: Codable, Equatable {
     var dailyRemindersEnabled = true
     var reminderHour = 20
+    var reminderMinute = 0
     var lowHealthAlertsEnabled = true
     var streakAlertsEnabled = true
     var messageAlertsEnabled = true
     var weeklySummaryEnabled = true
+
+    private enum CodingKeys: String, CodingKey {
+        case dailyRemindersEnabled
+        case reminderHour
+        case reminderMinute
+        case lowHealthAlertsEnabled
+        case streakAlertsEnabled
+        case messageAlertsEnabled
+        case weeklySummaryEnabled
+    }
+
+    init(
+        dailyRemindersEnabled: Bool = true,
+        reminderHour: Int = 20,
+        reminderMinute: Int = 0,
+        lowHealthAlertsEnabled: Bool = true,
+        streakAlertsEnabled: Bool = true,
+        messageAlertsEnabled: Bool = true,
+        weeklySummaryEnabled: Bool = true
+    ) {
+        self.dailyRemindersEnabled = dailyRemindersEnabled
+        self.reminderHour = reminderHour
+        self.reminderMinute = reminderMinute
+        self.lowHealthAlertsEnabled = lowHealthAlertsEnabled
+        self.streakAlertsEnabled = streakAlertsEnabled
+        self.messageAlertsEnabled = messageAlertsEnabled
+        self.weeklySummaryEnabled = weeklySummaryEnabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        dailyRemindersEnabled = try container.decodeIfPresent(Bool.self, forKey: .dailyRemindersEnabled) ?? true
+        reminderHour = try container.decodeIfPresent(Int.self, forKey: .reminderHour) ?? 20
+        reminderMinute = try container.decodeIfPresent(Int.self, forKey: .reminderMinute) ?? 0
+        lowHealthAlertsEnabled = try container.decodeIfPresent(Bool.self, forKey: .lowHealthAlertsEnabled) ?? true
+        streakAlertsEnabled = try container.decodeIfPresent(Bool.self, forKey: .streakAlertsEnabled) ?? true
+        messageAlertsEnabled = try container.decodeIfPresent(Bool.self, forKey: .messageAlertsEnabled) ?? true
+        weeklySummaryEnabled = try container.decodeIfPresent(Bool.self, forKey: .weeklySummaryEnabled) ?? true
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(dailyRemindersEnabled, forKey: .dailyRemindersEnabled)
+        try container.encode(reminderHour, forKey: .reminderHour)
+        try container.encode(reminderMinute, forKey: .reminderMinute)
+        try container.encode(lowHealthAlertsEnabled, forKey: .lowHealthAlertsEnabled)
+        try container.encode(streakAlertsEnabled, forKey: .streakAlertsEnabled)
+        try container.encode(messageAlertsEnabled, forKey: .messageAlertsEnabled)
+        try container.encode(weeklySummaryEnabled, forKey: .weeklySummaryEnabled)
+    }
 }
 
 struct AppSettings: Codable, Equatable {
@@ -66,6 +117,7 @@ enum SettingsPersistence {
             : contacts.first?.id
         let defaultCallMinutes = min(max(decoded.defaultCallMinutes, 1), 240)
         let reminderHour = min(max(decoded.notificationPreferences.reminderHour, 0), 23)
+        let reminderMinute = min(max(decoded.notificationPreferences.reminderMinute, 0), 59)
 
         return AppSettings(
             contacts: contacts,
@@ -74,6 +126,7 @@ enum SettingsPersistence {
             notificationPreferences: NotificationPreferences(
                 dailyRemindersEnabled: decoded.notificationPreferences.dailyRemindersEnabled,
                 reminderHour: reminderHour,
+                reminderMinute: reminderMinute,
                 lowHealthAlertsEnabled: decoded.notificationPreferences.lowHealthAlertsEnabled,
                 streakAlertsEnabled: decoded.notificationPreferences.streakAlertsEnabled,
                 messageAlertsEnabled: decoded.notificationPreferences.messageAlertsEnabled,

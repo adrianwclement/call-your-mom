@@ -39,6 +39,11 @@ struct DashboardView: View {
     @State private var isContactPickerPresented = false
     @State private var pendingCallSession: PendingCallSession?
     @State private var postCallPrompt: PendingCallSession?
+    @State private var callFailureMessage: String?
+    @State private var isReminderPickerPresented = false
+    @State private var reminderDraftDate = Date()
+    @State private var isDefaultContactPickerPresented = false
+    @State private var selectedDefaultContactDraftID: UUID?
     @State private var isWalkthroughPresented = false
     @State private var walkthroughIndex = 0
     @State private var isGameMode = false
@@ -246,6 +251,19 @@ struct DashboardView: View {
                 importSystemContact(contact)
             }
         }
+        .sheet(isPresented: $isReminderPickerPresented) {
+            ReminderTimePickerSheet(
+                selectedDate: $reminderDraftDate,
+                onSave: applyReminderDraft
+            )
+        }
+        .sheet(isPresented: $isDefaultContactPickerPresented) {
+            DefaultContactPickerSheet(
+                contacts: contacts,
+                selectedContactID: $selectedDefaultContactDraftID,
+                onSave: applyDefaultContactDraft
+            )
+        }
         .alert(
             "Log your call?",
             isPresented: Binding(
@@ -271,6 +289,23 @@ struct DashboardView: View {
             }
         } message: { session in
             Text("Add your call with \(session.contactName) so your Tamagotchi gets credit.")
+        }
+        .alert(
+            "Can't Start Call",
+            isPresented: Binding(
+                get: { callFailureMessage != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        callFailureMessage = nil
+                    }
+                }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                callFailureMessage = nil
+            }
+        } message: {
+            Text(callFailureMessage ?? "")
         }
     }
 
@@ -300,7 +335,11 @@ struct DashboardView: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(spacing: metrics.sectionSpacing) {
                         if quickActionsExpanded {
-                            QuickActionsFlyout()
+                            QuickActionsFlyout(
+                                onCallNow: handleCallNowQuickAction,
+                                onSetReminder: handleSetReminderQuickAction,
+                                onChooseContact: handleChooseContactQuickAction
+                            )
                                 .transition(.move(edge: .top).combined(with: .opacity))
                         }
 
@@ -456,6 +495,7 @@ struct DashboardView: View {
                         preferredContactID: $preferredContactID,
                         pendingContactName: $pendingContactName,
                         notificationPreferences: $notificationPreferences,
+                        reminderTime: reminderDateBinding,
                         defaultCallMinutes: $defaultCallMinutes,
                         onAddContact: addContact,
                         onImportContact: { isContactPickerPresented = true },
@@ -604,6 +644,7 @@ struct DashboardView: View {
             !phoneNumber.digitsOnly.isEmpty,
             let url = URL(string: "tel://\(phoneNumber.digitsOnly)")
         else {
+            callFailureMessage = "Add a valid phone number for \(contact.name) before trying to call."
             return
         }
 
@@ -620,7 +661,69 @@ struct DashboardView: View {
             contactName: contact.name,
             after: max(300, TimeInterval(defaultCallMinutes * 60 + 60))
         )
-        openURL(url)
+        openURL(url) { accepted in
+            guard !accepted else { return }
+            clearPendingCallTracking()
+            callFailureMessage = "This device or simulator can't place phone calls from the app. Try again on an iPhone with calling available."
+        }
+    }
+
+    private func handleCallNowQuickAction() {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+            quickActionsExpanded = false
+        }
+
+        guard let preferredContact else {
+            navigate(to: .settings)
+            return
+        }
+
+        selectedLogContactID = preferredContact.id
+        logMinutes = String(defaultCallMinutes)
+
+        guard let phoneNumber = preferredContact.phoneNumber, !phoneNumber.digitsOnly.isEmpty else {
+            callFailureMessage = "Your default contact needs a phone number before Call now can start a call."
+            navigate(to: .settings)
+            return
+        }
+
+        callContact(preferredContact)
+    }
+
+    private func handleSetReminderQuickAction() {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+            quickActionsExpanded = false
+        }
+
+        notificationPreferences.dailyRemindersEnabled = true
+        reminderDraftDate = reminderDateBinding.wrappedValue
+        isReminderPickerPresented = true
+    }
+
+    private func applyReminderDraft() {
+        reminderDateBinding.wrappedValue = reminderDraftDate
+        notificationPreferences.dailyRemindersEnabled = true
+        isReminderPickerPresented = false
+    }
+
+    private func handleChooseContactQuickAction() {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+            quickActionsExpanded = false
+        }
+
+        guard !contacts.isEmpty else {
+            navigate(to: .settings)
+            return
+        }
+
+        selectedDefaultContactDraftID = preferredContactID ?? contacts.first?.id
+        isDefaultContactPickerPresented = true
+    }
+
+    private func applyDefaultContactDraft() {
+        preferredContactID = selectedDefaultContactDraftID ?? contacts.first?.id
+        selectedLogContactID = preferredContactID
+        isDefaultContactPickerPresented = false
     }
 
     private func presentPostCallPromptIfReady() {
@@ -701,6 +804,7 @@ struct DashboardView: View {
         if notificationPreferences.dailyRemindersEnabled, let contact = preferredContact {
             LocalNotificationManager.shared.scheduleDailyReminder(
                 hour: notificationPreferences.reminderHour,
+                minute: notificationPreferences.reminderMinute,
                 contactName: contact.name,
                 minutes: defaultCallMinutes
             )
@@ -790,11 +894,31 @@ struct DashboardView: View {
 
     private var formattedReminderHour: String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "h a"
+        formatter.dateFormat = "h:mm a"
 
-        let components = DateComponents(hour: notificationPreferences.reminderHour)
+        let components = DateComponents(
+            hour: notificationPreferences.reminderHour,
+            minute: notificationPreferences.reminderMinute
+        )
         let date = Calendar.current.date(from: components) ?? Date()
         return formatter.string(from: date)
+    }
+
+    private var reminderDateBinding: Binding<Date> {
+        Binding(
+            get: {
+                let components = DateComponents(
+                    hour: notificationPreferences.reminderHour,
+                    minute: notificationPreferences.reminderMinute
+                )
+                return Calendar.current.date(from: components) ?? Date()
+            },
+            set: { newValue in
+                let components = Calendar.current.dateComponents([.hour, .minute], from: newValue)
+                notificationPreferences.reminderHour = components.hour ?? notificationPreferences.reminderHour
+                notificationPreferences.reminderMinute = components.minute ?? notificationPreferences.reminderMinute
+            }
+        )
     }
 
     private func navigate(to page: HomePage) {
@@ -1530,12 +1654,122 @@ private struct FloatingHealthBar: View {
 }
 
 private struct QuickActionsFlyout: View {
+    let onCallNow: () -> Void
+    let onSetReminder: () -> Void
+    let onChooseContact: () -> Void
+
     var body: some View {
         VStack(spacing: 10) {
-            ExpandableActionRow(icon: "phone.fill", title: "Call now", subtitle: "Jump straight into a check-in.")
-            ExpandableActionRow(icon: "bell.fill", title: "Set reminder", subtitle: "Pick a time for your next call.")
-            ExpandableActionRow(icon: "person.crop.circle.badge.plus", title: "Choose contact", subtitle: "Change who today's reminder is for.")
+            ExpandableActionRow(
+                icon: "phone.fill",
+                title: "Call now",
+                subtitle: "Jump straight into a check-in.",
+                action: onCallNow
+            )
+            ExpandableActionRow(
+                icon: "bell.fill",
+                title: "Set reminder",
+                subtitle: "Pick a time for your next call.",
+                action: onSetReminder
+            )
+            ExpandableActionRow(
+                icon: "person.crop.circle.badge.plus",
+                title: "Choose contact",
+                subtitle: "Change who today's reminder is for.",
+                action: onChooseContact
+            )
         }
+    }
+}
+
+private struct ReminderTimePickerSheet: View {
+    @Binding var selectedDate: Date
+    let onSave: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Pick a daily reminder time for your next check-in.")
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    .foregroundStyle(DetailCardPalette.secondaryText)
+
+                DatePicker(
+                    "Reminder time",
+                    selection: $selectedDate,
+                    displayedComponents: .hourAndMinute
+                )
+                .datePickerStyle(.wheel)
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
+
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .navigationTitle("Set Reminder")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        onSave()
+                    }
+                    .fontWeight(.bold)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
+    }
+}
+
+private struct DefaultContactPickerSheet: View {
+    let contacts: [AppContact]
+    @Binding var selectedContactID: UUID?
+    let onSave: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Choose who the app should treat as your default contact.")
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    .foregroundStyle(DetailCardPalette.secondaryText)
+
+                Picker("Default contact", selection: $selectedContactID) {
+                    ForEach(contacts) { contact in
+                        Text(contact.name).tag(contact.id as UUID?)
+                    }
+                }
+                .pickerStyle(.wheel)
+
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .navigationTitle("Choose Contact")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        onSave()
+                    }
+                    .fontWeight(.bold)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
     }
 }
 
@@ -1543,9 +1777,17 @@ private struct ExpandableActionRow: View {
     let icon: String
     let title: String
     let subtitle: String
+    let action: () -> Void
+
+    init(icon: String, title: String, subtitle: String, action: @escaping () -> Void = {}) {
+        self.icon = icon
+        self.title = title
+        self.subtitle = subtitle
+        self.action = action
+    }
 
     var body: some View {
-        Button(action: {}) {
+        Button(action: action) {
             HStack(spacing: 12) {
                 ZStack {
                     Circle()
@@ -2671,7 +2913,7 @@ private struct LogPageCard: View {
                         HStack {
                             Image(systemName: "phone.badge.plus.fill")
                                 .font(.system(size: 15, weight: .bold))
-                            Text("Save Call")
+                            Text("Log Call")
                                 .font(.system(size: 16, weight: .black, design: .rounded))
                         }
                         .foregroundStyle(.white)
@@ -2839,6 +3081,7 @@ private struct SettingsPageCard: View {
     @Binding var preferredContactID: UUID?
     @Binding var pendingContactName: String
     @Binding var notificationPreferences: NotificationPreferences
+    @Binding var reminderTime: Date
     @Binding var defaultCallMinutes: Int
     let onAddContact: () -> Void
     let onImportContact: () -> Void
@@ -2958,12 +3201,27 @@ private struct SettingsPageCard: View {
                 )
 
                 if notificationPreferences.dailyRemindersEnabled {
-                    Stepper(value: $notificationPreferences.reminderHour, in: 0...23) {
-                        Text("Reminder time: \(formattedHour(notificationPreferences.reminderHour))")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Reminder time")
                             .font(.system(size: 14, weight: .bold, design: .rounded))
                             .foregroundStyle(DetailCardPalette.bodyText)
+
+                        DatePicker(
+                            "Reminder time",
+                            selection: $reminderTime,
+                            displayedComponents: .hourAndMinute
+                        )
+                        .datePickerStyle(.compact)
+                        .labelsHidden()
+                        .tint(DetailCardPalette.bodyText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 14)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(DetailCardPalette.surfaceStrongFill)
+                        )
                     }
-                    .tint(DetailCardPalette.bodyText)
                 }
 
                 SettingsToggleRow(
@@ -3000,13 +3258,6 @@ private struct SettingsPageCard: View {
         )
         .shadow(color: Color.black.opacity(0.10), radius: 20, y: 10)
         .environment(\.colorScheme, .light)
-    }
-
-    private func formattedHour(_ hour: Int) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "h a"
-        let date = Calendar.current.date(from: DateComponents(hour: hour)) ?? Date()
-        return formatter.string(from: date)
     }
 }
 
