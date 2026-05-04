@@ -29,7 +29,9 @@ struct ContentView: View {
                 .font(.title2)
             
             Button("📞 Call Loved One") {
-                increaseHealth()
+                ButtonClickSound.perform {
+                    increaseHealth()
+                }
             }
             .padding()
             .background(Color.green)

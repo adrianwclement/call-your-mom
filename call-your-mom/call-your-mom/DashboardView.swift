@@ -8,7 +8,97 @@
 import SwiftUI
 import Contacts
 import ContactsUI
+import AVFoundation
 internal import Combine
+
+enum ButtonClickSound {
+    private static let player: AVAudioPlayer? = {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("call-your-mom-low-button-click-v2.wav")
+
+        if !FileManager.default.fileExists(atPath: fileURL.path) {
+            try? makeClickData().write(to: fileURL, options: .atomic)
+        }
+
+        let player = try? AVAudioPlayer(contentsOf: fileURL)
+        player?.volume = 1.0
+        player?.prepareToPlay()
+        return player
+    }()
+
+    static func play() {
+        player?.currentTime = 0
+        player?.play()
+    }
+
+    static func perform(_ action: () -> Void) {
+        play()
+        action()
+    }
+
+    static func action(_ action: @escaping () -> Void) -> () -> Void {
+        {
+            perform(action)
+        }
+    }
+
+    private static func makeClickData() -> Data {
+        let sampleRate = 44_100
+        let channelCount = 1
+        let bitsPerSample = 16
+        let duration = 0.045
+        let sampleCount = Int(Double(sampleRate) * duration)
+        var pcmData = Data()
+
+        for index in 0..<sampleCount {
+            let time = Double(index) / Double(sampleRate)
+            let fade = exp(-78 * time)
+            let lowTone = sin(2 * Double.pi * 185 * time)
+            let warmEdge = sin(2 * Double.pi * 370 * time) * 0.28
+            let sample = (lowTone + warmEdge) * fade * 0.55
+            let clampedSample = max(-1, min(1, sample))
+            var intSample = Int16(clampedSample * Double(Int16.max)).littleEndian
+            Swift.withUnsafeBytes(of: &intSample) {
+                pcmData.append(contentsOf: $0)
+            }
+        }
+
+        let byteRate = sampleRate * channelCount * bitsPerSample / 8
+        let blockAlign = channelCount * bitsPerSample / 8
+        var data = Data()
+        data.append("RIFF".data(using: .ascii)!)
+        data.appendLittleEndian(UInt32(36 + pcmData.count))
+        data.append("WAVE".data(using: .ascii)!)
+        data.append("fmt ".data(using: .ascii)!)
+        data.appendLittleEndian(UInt32(16))
+        data.appendLittleEndian(UInt16(1))
+        data.appendLittleEndian(UInt16(channelCount))
+        data.appendLittleEndian(UInt32(sampleRate))
+        data.appendLittleEndian(UInt32(byteRate))
+        data.appendLittleEndian(UInt16(blockAlign))
+        data.appendLittleEndian(UInt16(bitsPerSample))
+        data.append("data".data(using: .ascii)!)
+        data.appendLittleEndian(UInt32(pcmData.count))
+        data.append(pcmData)
+        return data
+    }
+}
+
+private extension Data {
+    mutating func appendLittleEndian(_ value: UInt16) {
+        var littleEndianValue = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndianValue) {
+            append(contentsOf: $0)
+        }
+    }
+
+    mutating func appendLittleEndian(_ value: UInt32) {
+        var littleEndianValue = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndianValue) {
+            append(contentsOf: $0)
+        }
+    }
+}
 
 struct DashboardView: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -315,15 +405,21 @@ struct DashboardView: View {
             presenting: postCallPrompt
         ) { session in
             Button("Save \(estimatedMinutes(for: session)) min") {
-                savePendingCall(session)
+                ButtonClickSound.perform {
+                    savePendingCall(session)
+                }
             }
 
             Button("Review") {
-                reviewPendingCall(session)
+                ButtonClickSound.perform {
+                    reviewPendingCall(session)
+                }
             }
 
             Button("Later", role: .cancel) {
-                postCallPrompt = nil
+                ButtonClickSound.perform {
+                    postCallPrompt = nil
+                }
             }
         } message: { session in
             Text("Add your call with \(session.contactName) so your Tamagotchi gets credit.")
@@ -340,7 +436,9 @@ struct DashboardView: View {
             )
         ) {
             Button("OK", role: .cancel) {
-                callFailureMessage = nil
+                ButtonClickSound.perform {
+                    callFailureMessage = nil
+                }
             }
         } message: {
             Text(callFailureMessage ?? "")
@@ -351,73 +449,77 @@ struct DashboardView: View {
     private func homeView(metrics: LayoutMetrics, isShowingGame: Bool, isLaunchingGame: Bool) -> some View {
         GeometryReader { geometry in
             let panelWidth = geometry.size.width
+            let safePanelWidth = max(panelWidth, 1)
             let baseOffset = CGFloat(activeHomePanelIndex) * panelWidth
             let currentOffset = min(max(baseOffset - homeDragTranslation, 0), panelWidth * 2)
 
-            HStack(spacing: 0) {
-            SpriteSelectionGridView(
-                sprites: availableSprites,
-                selectedSprite: selectedSprite,
-                selectedClothing: selectedClothing,
-                health: health,
-                selectedDanceSpeed: selectedDanceSpeed,
-                onSelectSprite: { sprite in
-                    selectedSprite = sprite
-                }, spriteLevels: spriteLevels
-            )
-                .padding(.horizontal, metrics.horizontalPadding)
-                .padding(.bottom, metrics.contentBottomPadding)
-                .frame(width: panelWidth)
-                .frame(minHeight: metrics.minContentHeight)
-
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: metrics.sectionSpacing) {
-                        if quickActionsExpanded {
-                            QuickActionsFlyout(
-                                onCallNow: handleCallNowQuickAction,
-                                onSetReminder: handleSetReminderQuickAction,
-                                onChooseContact: handleChooseContactQuickAction
-                            )
-                                .transition(.move(edge: .top).combined(with: .opacity))
-                        }
-
-                        FloatingHealthBar(
-                            health: health,
-                            isAnimating: healthPulse,
-                            isTutorialHighlighted: isWalkthroughPresented && WalkthroughStep.allCases[walkthroughIndex].focus == .healthBar
-                        )
-
-                        IntegratedTamagotchiStage(
-                            health: health,
-                            sprite: selectedSprite,
-                            clothing: selectedClothing,
-                            danceSpeed: selectedDanceSpeed,
-                            currentSpriteLevel: currentSpriteLevel,
-                            isGameMode: isShowingGame,
-                            hidesSprite: isLaunchingGame,
-                            onLaunchGame: enterGameMode
-                        )
-
-                        Spacer(minLength: 0)
-                    }
+            ZStack(alignment: .bottom) {
+                HStack(spacing: 0) {
+                    SpriteSelectionGridView(
+                        sprites: availableSprites,
+                        selectedSprite: selectedSprite,
+                        selectedClothing: selectedClothing,
+                        health: health,
+                        selectedDanceSpeed: selectedDanceSpeed,
+                        onSelectSprite: { sprite in
+                            selectedSprite = sprite
+                        }, spriteLevels: spriteLevels
+                    )
                     .padding(.horizontal, metrics.horizontalPadding)
                     .padding(.bottom, metrics.contentBottomPadding)
-                    .frame(maxWidth: .infinity, minHeight: metrics.minContentHeight)
-                }
-                .scrollBounceBehavior(.basedOnSize)
-                .frame(width: panelWidth)
-                .frame(minHeight: metrics.minContentHeight)
+                    .frame(width: panelWidth)
+                    .frame(minHeight: metrics.minContentHeight)
 
-                PixelGardenPlaygroundView(
-                    sprites: availableSprites,
-                    selectedClothing: selectedClothing
-                )
-                .padding(.horizontal, metrics.horizontalPadding)
-                .padding(.bottom, metrics.contentBottomPadding)
-                .frame(width: panelWidth)
-                .frame(minHeight: metrics.minContentHeight)
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(spacing: metrics.sectionSpacing) {
+                            if quickActionsExpanded {
+                                QuickActionsFlyout(
+                                    onCallNow: handleCallNowQuickAction,
+                                    onSetReminder: handleSetReminderQuickAction,
+                                    onChooseContact: handleChooseContactQuickAction
+                                )
+                                    .transition(.move(edge: .top).combined(with: .opacity))
+                            }
+
+                            FloatingHealthBar(
+                                health: health,
+                                isAnimating: healthPulse,
+                                isTutorialHighlighted: isWalkthroughPresented && WalkthroughStep.allCases[walkthroughIndex].focus == .healthBar
+                            )
+
+                            IntegratedTamagotchiStage(
+                                health: health,
+                                sprite: selectedSprite,
+                                clothing: selectedClothing,
+                                danceSpeed: selectedDanceSpeed,
+                                currentSpriteLevel: currentSpriteLevel,
+                                isGameMode: isShowingGame,
+                                hidesSprite: isLaunchingGame,
+                                onLaunchGame: enterGameMode
+                            )
+
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, metrics.horizontalPadding)
+                        .padding(.bottom, metrics.contentBottomPadding)
+                        .frame(maxWidth: .infinity, minHeight: metrics.minContentHeight)
+                    }
+                    .scrollBounceBehavior(.basedOnSize)
+                    .frame(width: panelWidth)
+                    .frame(minHeight: metrics.minContentHeight)
+
+                    PixelGardenPlaygroundView(
+                        sprites: availableSprites,
+                        selectedClothing: selectedClothing
+                    )
+                    .padding(.horizontal, metrics.horizontalPadding)
+                    .padding(.bottom, metrics.contentBottomPadding)
+                    .frame(width: panelWidth)
+                    .frame(minHeight: metrics.minContentHeight)
+                }
+                .offset(x: -currentOffset)
+
             }
-            .offset(x: -currentOffset)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
@@ -435,7 +537,7 @@ struct DashboardView: View {
                         }
                         let velocityDelta = value.predictedEndTranslation.width - value.translation.width
                         let projectedOffset = min(max(baseOffset - value.translation.width - (velocityDelta * 0.2), 0), panelWidth * 2)
-                        let resolvedPanel = Int((projectedOffset / panelWidth).rounded())
+                        let resolvedPanel = Int((projectedOffset / safePanelWidth).rounded())
                         let clampedPanel = min(max(resolvedPanel, 0), 2)
 
                         withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.86, blendDuration: 0.12)) {
@@ -1413,7 +1515,7 @@ private struct WalkthroughOverlay: View {
             }
 
             HStack(spacing: 12) {
-                Button(action: onSkip) {
+                Button(action: ButtonClickSound.action(onSkip)) {
                     Text("Skip")
                         .font(.system(size: 14, weight: .black, design: .rounded))
                         .foregroundStyle(DetailCardPalette.mutedText)
@@ -1422,7 +1524,7 @@ private struct WalkthroughOverlay: View {
                 }
                 .buttonStyle(.plain)
 
-                Button(action: onNext) {
+                Button(action: ButtonClickSound.action(onNext)) {
                     Text(isLastStep ? "Start" : "Next")
                         .font(.system(size: 15, weight: .black, design: .rounded))
                         .foregroundStyle(.white)
@@ -1582,7 +1684,7 @@ private struct HomeTopBar: View {
 
             Spacer()
 
-            Button(action: onTitleTap) {
+            Button(action: ButtonClickSound.action(onTitleTap)) {
                 HStack(spacing: 6) {
                     Text("Call Your Mom")
                         .font(.system(size: 18, weight: .black, design: .rounded))
@@ -1751,13 +1853,17 @@ private struct ReminderTimePickerSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
-                        dismiss()
+                        ButtonClickSound.perform {
+                            dismiss()
+                        }
                     }
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        onSave()
+                        ButtonClickSound.perform {
+                            onSave()
+                        }
                     }
                     .fontWeight(.bold)
                 }
@@ -1796,13 +1902,17 @@ private struct DefaultContactPickerSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
-                        dismiss()
+                        ButtonClickSound.perform {
+                            dismiss()
+                        }
                     }
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        onSave()
+                        ButtonClickSound.perform {
+                            onSave()
+                        }
                     }
                     .fontWeight(.bold)
                 }
@@ -1827,7 +1937,7 @@ private struct ExpandableActionRow: View {
     }
 
     var body: some View {
-        Button(action: action) {
+        Button(action: ButtonClickSound.action(action)) {
             HStack(spacing: 12) {
                 ZStack {
                     Circle()
@@ -1899,7 +2009,7 @@ private struct IntegratedTamagotchiStage: View {
                 VStack {
                     Spacer()
 
-                    Button(action: onLaunchGame) {
+                    Button(action: ButtonClickSound.action(onLaunchGame)) {
                         HStack(spacing: 8) {
                             Image(systemName: "play.fill")
                                 .font(.system(size: 13, weight: .black))
@@ -1915,8 +2025,8 @@ private struct IntegratedTamagotchiStage: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .offset(y: 54)
                 }
+                .offset(y: 54)
             }
         }
         .frame(height: 300)
@@ -1944,7 +2054,7 @@ private struct SpriteSelectionGridView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVGrid(columns: columns, spacing: 12) {
                     ForEach(sprites) { sprite in
-                        Button(action: { onSelectSprite(sprite) }) {
+                        Button(action: ButtonClickSound.action { onSelectSprite(sprite) }) {
                             VStack(spacing: 8) {
                                 PixelTamagotchi(
                                     health: health,
@@ -2382,7 +2492,7 @@ private struct FlappyTamagotchiGameView: View {
                     HStack(alignment: .center) {
                         ScorePill(score: score)
                         Spacer()
-                        Button(action: onExit) {
+                        Button(action: ButtonClickSound.action(onExit)) {
                             Image(systemName: "xmark")
                                 .font(.system(size: 15, weight: .black))
                                 .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
@@ -2771,7 +2881,7 @@ private struct DetailPageCard: View {
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                 ForEach(ClothingOption.allCases) { clothing in
-                    Button(action: { selectedClothing = clothing }) {
+                    Button(action: ButtonClickSound.action { selectedClothing = clothing }) {
                         HStack(spacing: 8) {
                             Circle()
                                 .fill(clothing.color)
@@ -2800,7 +2910,7 @@ private struct DetailPageCard: View {
 
             HStack(spacing: 8) {
                 ForEach(DanceSpeed.allCases) { speed in
-                    Button(action: { selectedDanceSpeed = speed }) {
+                    Button(action: ButtonClickSound.action { selectedDanceSpeed = speed }) {
                         Text(speed.displayName)
                             .font(.system(size: 13, weight: .bold, design: .rounded))
                             .foregroundStyle(selectedDanceSpeed == speed ? .white : Color(red: 0.10, green: 0.17, blue: 0.27))
@@ -2854,7 +2964,7 @@ private struct DetailPageCard: View {
                 .foregroundStyle(DetailCardPalette.primaryText)
 
             ForEach(AppTheme.allCases) { theme in
-                Button(action: { selectedTheme = theme }) {
+                Button(action: ButtonClickSound.action { selectedTheme = theme }) {
                     HStack(spacing: 10) {
                         HStack(spacing: 4) {
                             Circle().fill(theme.primary).frame(width: 10, height: 10)
@@ -2926,7 +3036,7 @@ private struct LogPageCard: View {
                     ContactPickerField(contacts: contacts, selectedContactID: $selectedContactID)
 
                     HStack(spacing: 10) {
-                        Button(action: onImportContact) {
+                        Button(action: ButtonClickSound.action(onImportContact)) {
                             Label("Import Contact", systemImage: "person.crop.circle.badge.plus")
                                 .font(.system(size: 13, weight: .black, design: .rounded))
                                 .foregroundStyle(DetailCardPalette.bodyText)
@@ -2940,7 +3050,7 @@ private struct LogPageCard: View {
                         .buttonStyle(.plain)
 
                         if let selectedContact, selectedContact.phoneNumber != nil {
-                            Button(action: { onCallContact(selectedContact) }) {
+                            Button(action: ButtonClickSound.action { onCallContact(selectedContact) }) {
                                 Label("Call", systemImage: "phone.fill")
                                     .font(.system(size: 13, weight: .black, design: .rounded))
                                     .foregroundStyle(.white)
@@ -2962,7 +3072,7 @@ private struct LogPageCard: View {
                         isNumeric: true
                     )
 
-                    Button(action: onSubmit) {
+                    Button(action: ButtonClickSound.action(onSubmit)) {
                         HStack {
                             Image(systemName: "phone.badge.plus.fill")
                                 .font(.system(size: 15, weight: .bold))
@@ -3022,7 +3132,7 @@ private struct EmptyLogStateCard: View {
                 .foregroundStyle(DetailCardPalette.mutedText)
 
             HStack(spacing: 10) {
-                Button(action: onImportContact) {
+                Button(action: ButtonClickSound.action(onImportContact)) {
                     Label("Import", systemImage: "person.crop.circle.badge.plus")
                         .font(.system(size: 14, weight: .black, design: .rounded))
                         .foregroundStyle(.white)
@@ -3035,7 +3145,7 @@ private struct EmptyLogStateCard: View {
                 }
                 .buttonStyle(.plain)
 
-                Button(action: onOpenSettings) {
+                Button(action: ButtonClickSound.action(onOpenSettings)) {
                     Text("Open Settings")
                         .font(.system(size: 14, weight: .black, design: .rounded))
                         .foregroundStyle(.white)
@@ -3074,7 +3184,7 @@ private struct RecentLogShortcuts: View {
 
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                     ForEach(suggestions) { entry in
-                        Button(action: { onSelect(entry) }) {
+                        Button(action: ButtonClickSound.action { onSelect(entry) }) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(entry.name)
                                     .font(.system(size: 13, weight: .black, design: .rounded))
@@ -3164,7 +3274,7 @@ private struct SettingsPageCard: View {
                                 .fill(DetailCardPalette.surfaceStrongFill)
                         )
 
-                    Button(action: onAddContact) {
+                    Button(action: ButtonClickSound.action(onAddContact)) {
                         Image(systemName: "plus")
                             .font(.system(size: 15, weight: .black))
                             .foregroundStyle(.white)
@@ -3177,7 +3287,7 @@ private struct SettingsPageCard: View {
                     .buttonStyle(.plain)
                 }
 
-                Button(action: onImportContact) {
+                Button(action: ButtonClickSound.action(onImportContact)) {
                     Label("Import from iPhone Contacts", systemImage: "person.crop.circle.badge.plus")
                         .font(.system(size: 14, weight: .black, design: .rounded))
                         .foregroundStyle(DetailCardPalette.bodyText)
@@ -3343,7 +3453,7 @@ private struct ContactSettingsRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Button(action: onSetPreferred) {
+            Button(action: ButtonClickSound.action(onSetPreferred)) {
                 HStack(spacing: 10) {
                     Image(systemName: isPreferred ? "star.fill" : "star")
                         .font(.system(size: 14, weight: .bold))
@@ -3364,7 +3474,7 @@ private struct ContactSettingsRow: View {
             }
             .buttonStyle(.plain)
 
-            Button(action: onDelete) {
+            Button(action: ButtonClickSound.action(onDelete)) {
                 Image(systemName: "trash")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(Color(red: 0.88, green: 0.37, blue: 0.42))
@@ -3569,7 +3679,7 @@ private struct DockButton: View {
     let onTap: () -> Void
 
     var body: some View {
-        Button(action: onTap) {
+        Button(action: ButtonClickSound.action(onTap)) {
             VStack(spacing: 8) {
                 ZStack {
                     Circle()
@@ -3636,7 +3746,7 @@ private struct CircularIconButton: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
+        Button(action: ButtonClickSound.action(action)) {
             Circle()
                 .fill(Color(red: 0.11, green: 0.64, blue: 0.57))
                 .frame(width: diameter, height: diameter)
