@@ -178,6 +178,7 @@ struct DashboardView: View {
                 healthPulse = true
             }
             reloadSpriteCatalog()
+            restoreAppState()
             LocalNotificationManager.shared.requestAuthorization()
             restorePersistedHealth()
             restoreSettings()
@@ -200,6 +201,7 @@ struct DashboardView: View {
                 presentPostCallPromptIfReady()
             } else if newValue == .background || newValue == .inactive {
                 persistHealthState()
+                persistAppState()
                 persistSettings()
                 persistPendingCallTracking()
                 syncLowHealthNotification()
@@ -208,6 +210,12 @@ struct DashboardView: View {
         .onChange(of: health) { _, _ in
             persistHealthState()
             syncLowHealthNotification()
+        }
+        .onChange(of: callLogs) { _, _ in
+            AppStatePersistence.saveCallLogs(callLogs)
+        }
+        .onChange(of: selectedSprite) { _, _ in
+            AppStatePersistence.saveSelectedSpriteID(selectedSprite.id)
         }
         .onChange(of: contacts) { _, _ in
             sanitizeContactsAfterMutation()
@@ -505,6 +513,22 @@ struct DashboardView: View {
         } else {
             selectedSprite = TamagotchiSpriteCatalog.preferredInitialSprite(from: loadedSprites)
         }
+    }
+
+    private func restoreAppState() {
+        callLogs = AppStatePersistence.loadCallLogs()
+        restoreSelectedSprite()
+    }
+
+    private func persistAppState() {
+        AppStatePersistence.saveCallLogs(callLogs)
+        AppStatePersistence.saveSelectedSpriteID(selectedSprite.id)
+    }
+
+    private func restoreSelectedSprite() {
+        guard let selectedSpriteID = AppStatePersistence.loadSelectedSpriteID() else { return }
+        guard let persistedSprite = availableSprites.first(where: { $0.id == selectedSpriteID }) else { return }
+        selectedSprite = persistedSprite
     }
 
     private func refreshStreakDays() {
@@ -962,6 +986,35 @@ private enum WalkthroughPersistence {
 
     static func markCompleted() {
         UserDefaults.standard.set(true, forKey: storageKey)
+    }
+}
+
+private enum AppStatePersistence {
+    private static let callLogsKey = "appState.callLogs"
+    private static let selectedSpriteIDKey = "appState.selectedSpriteID"
+
+    static func loadCallLogs() -> [CallLogEntry] {
+        guard
+            let data = UserDefaults.standard.data(forKey: callLogsKey),
+            let logs = try? JSONDecoder().decode([CallLogEntry].self, from: data)
+        else {
+            return []
+        }
+
+        return logs.sorted { $0.loggedAt > $1.loggedAt }
+    }
+
+    static func saveCallLogs(_ logs: [CallLogEntry]) {
+        guard let encoded = try? JSONEncoder().encode(logs) else { return }
+        UserDefaults.standard.set(encoded, forKey: callLogsKey)
+    }
+
+    static func loadSelectedSpriteID() -> String? {
+        UserDefaults.standard.string(forKey: selectedSpriteIDKey)
+    }
+
+    static func saveSelectedSpriteID(_ id: String) {
+        UserDefaults.standard.set(id, forKey: selectedSpriteIDKey)
     }
 }
 
@@ -3427,11 +3480,18 @@ private struct InboxItem: Identifiable {
     let kind: Kind
 }
 
-private struct CallLogEntry: Identifiable {
-    let id = UUID()
+private struct CallLogEntry: Codable, Identifiable, Equatable {
+    let id: UUID
     let name: String
     let minutes: Int
     let loggedAt: Date
+
+    init(id: UUID = UUID(), name: String, minutes: Int, loggedAt: Date) {
+        self.id = id
+        self.name = name
+        self.minutes = minutes
+        self.loggedAt = loggedAt
+    }
 }
 
 private enum StreakCalculator {
