@@ -145,6 +145,7 @@ struct DashboardView: View {
     @State private var currentSpriteLevel: SpriteLevel = SpriteLevel(spriteID: "default")
     @State private var showLevelUpNotification = false
     @State private var lastLevelUpValue = 1
+    @State private var isKeyboardVisible = false
     private let decayTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private func loadSpriteLevels() {
@@ -272,8 +273,8 @@ struct DashboardView: View {
                 }
 
             }
-            .safeAreaInset(edge: .bottom) {
-                if !showingGame {
+            .overlay(alignment: .bottom) {
+                if !showingGame && !isKeyboardVisible {
                     ActionDock(
                         activePage: $activePage,
                         metrics: metrics,
@@ -303,6 +304,20 @@ struct DashboardView: View {
                 }
             }
             .ignoresSafeArea()
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 24)
+                    .onEnded { value in
+                        guard isKeyboardVisible else { return }
+
+                        let horizontalTravel = abs(value.translation.width)
+                        let verticalTravel = abs(value.translation.height)
+
+                        if verticalTravel > horizontalTravel {
+                            dismissKeyboard()
+                        }
+                    }
+            )
         }
         .onAppear {
             withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
@@ -323,6 +338,16 @@ struct DashboardView: View {
         .onReceive(decayTimer) { _ in
             guard scenePhase == .active else { return }
             applyElapsedDecay(now: Date())
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                isKeyboardVisible = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                isKeyboardVisible = false
+            }
         }
         .onChange(of: scenePhase) { _, newValue in
             if newValue == .active {
@@ -445,6 +470,10 @@ struct DashboardView: View {
         }
     }
 
+    private func dismissKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+
     @ViewBuilder
     private func homeView(metrics: LayoutMetrics, isShowingGame: Bool, isLaunchingGame: Bool) -> some View {
         GeometryReader { geometry in
@@ -505,6 +534,7 @@ struct DashboardView: View {
                         .frame(maxWidth: .infinity, minHeight: metrics.minContentHeight)
                     }
                     .scrollBounceBehavior(.basedOnSize)
+                    .scrollDismissesKeyboard(.interactively)
                     .frame(width: panelWidth)
                     .frame(minHeight: metrics.minContentHeight)
 
@@ -660,6 +690,7 @@ struct DashboardView: View {
             .frame(maxWidth: .infinity, minHeight: metrics.minContentHeight)
         }
         .scrollBounceBehavior(.basedOnSize)
+        .scrollDismissesKeyboard(.interactively)
     }
 
     private func submitLogEntry() {
@@ -2089,6 +2120,7 @@ private struct SpriteSelectionGridView: View {
                 }
                 .padding(.bottom, 8)
             }
+            .scrollDismissesKeyboard(.interactively)
         }
     }
 }
