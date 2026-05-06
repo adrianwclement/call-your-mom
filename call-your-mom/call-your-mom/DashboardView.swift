@@ -147,7 +147,7 @@ struct DashboardView: View {
     @State private var lastLevelUpValue = 1
     @State private var isKeyboardVisible = false
     private let decayTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-    private let minimumCallPromptDelay: TimeInterval = 45
+    private let minimumCallPromptDelay: TimeInterval = 20
     private let stalePendingCallInterval: TimeInterval = 30 * 60
 
     private func loadSpriteLevels() {
@@ -193,133 +193,10 @@ struct DashboardView: View {
     var body: some View {
         GeometryReader { geometry in
             let metrics = LayoutMetrics(container: geometry.size, safeArea: geometry.safeAreaInsets)
-            let showingGame = activePage == .home && (isGameMode || isLaunchingGame)
-
-            ZStack {
-                AppSkyBackground(theme: selectedTheme)
-
-                AppSceneBackground(theme: selectedTheme)
-                    .offset(y: -metrics.backgroundSceneLift)
-
-                if showingGame {
-                    FlappyTamagotchiGameView(
-                        theme: selectedTheme,
-                        health: health,
-                        sprite: selectedSprite,
-                        clothing: selectedClothing,
-                        birdVisible: !isLaunchingGame,
-                        onExit: exitGameMode
-                    )
-                    .allowsHitTesting(isGameMode)
-                    .opacity(isLaunchingGame ? gameEntryProgress : 1)
-                    .scaleEffect(isLaunchingGame ? 0.96 + (gameEntryProgress * 0.04) : 1)
-                    .zIndex(0)
-                }
-
-                VStack(spacing: metrics.sectionSpacing) {
-                    HomeTopBar(
-                        metrics: metrics,
-                        isBackVisible: activePage != .home,
-                        isQuickActionsExpanded: quickActionsExpanded,
-                        hasNotifications: !notifications.isEmpty,
-                        onTitleTap: {
-                            withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
-                                quickActionsExpanded.toggle()
-                            }
-                        },
-                        onBack: goBack,
-                        onWalkthrough: restartWalkthrough,
-                        onInbox: { navigate(to: .inbox) }
-                    )
-                    .padding(.top, metrics.topPadding)
-                    .padding(.horizontal, metrics.horizontalPadding)
-                    .opacity(showingGame ? 0 : 1)
-                    .offset(y: showingGame ? -80 : 0)
-                    .allowsHitTesting(!showingGame)
-
-                    Group {
-                        if activePage == .home {
-                            homeView(metrics: metrics, isShowingGame: showingGame, isLaunchingGame: isLaunchingGame)
-                        } else {
-                            detailPage(metrics: metrics, page: activePage)
-                        }
-                    }
-                    .offset(y: showingGame ? 120 : 0)
-                    .opacity(showingGame ? 0 : 1)
-                    .allowsHitTesting(!showingGame)
-                }
-
-                if activePage == .home && isLaunchingGame {
-                    LaunchingGameSpriteOverlay(
-                        containerSize: geometry.size,
-                        metrics: metrics,
-                        progress: gameEntryProgress,
-                        health: health,
-                        sprite: selectedSprite,
-                        clothing: selectedClothing
-                    )
-                    .allowsHitTesting(false)
-                    .zIndex(2)
-                }
-
-                if isWalkthroughPresented && !showingGame {
-                    WalkthroughOverlay(
-                        metrics: metrics,
-                        step: WalkthroughStep.allCases[walkthroughIndex],
-                        currentIndex: walkthroughIndex,
-                        totalCount: WalkthroughStep.allCases.count,
-                        onNext: advanceWalkthrough,
-                        onSkip: finishWalkthrough
-                    )
-                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                    .zIndex(4)
-                }
-
-            }
-            .overlay(alignment: .bottom) {
-                if !showingGame && !isKeyboardVisible {
-                    ActionDock(
-                        activePage: $activePage,
-                        metrics: metrics,
-                        isTutorialActive: isWalkthroughPresented,
-                        tutorialTarget: isWalkthroughPresented ? WalkthroughStep.allCases[walkthroughIndex].dockTarget : nil,
-                        onLogTap: { navigate(to: .log) },
-                        onSelectPage: handleDockSelection
-                    )
-                    .padding(.horizontal, metrics.horizontalPadding)
-                    .padding(.top, 8)
-                    .padding(.bottom, metrics.dockOuterBottomPadding)
-                    .background(
-                        LinearGradient(
-                            colors: [Color.clear, Color.black.opacity(0.10)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                        .ignoresSafeArea()
-                    )
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .transaction { transaction in
-                        if isWalkthroughPresented {
-                            transaction.animation = nil
-                        }
-                    }
-                    .allowsHitTesting(!isWalkthroughPresented)
-                }
-            }
-            .ignoresSafeArea()
-            .ignoresSafeArea(.keyboard, edges: .bottom)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 24)
-                    .onEnded { value in
-                        guard isKeyboardVisible else { return }
-
-                        let horizontalTravel = abs(value.translation.width)
-                        let verticalTravel = abs(value.translation.height)
-
-                        if verticalTravel > horizontalTravel {
-                            dismissKeyboard()
-                        }
-                    }
+            dashboardScene(
+                containerSize: geometry.size,
+                metrics: metrics,
+                showingGame: isShowingGame
             )
         }
         .onAppear {
@@ -332,7 +209,6 @@ struct DashboardView: View {
             restorePersistedHealth()
             restoreSettings()
             restorePendingCallTracking()
-            clearPendingCallIfReturnedTooQuickly()
             refreshStreakDays()
             syncNotificationSchedules()
             presentPostCallPromptIfReady()
@@ -359,7 +235,6 @@ struct DashboardView: View {
                 restorePersistedHealth()
                 restoreSettings()
                 restorePendingCallTracking()
-                clearPendingCallIfReturnedTooQuickly()
                 presentPostCallPromptIfReady()
             } else if newValue == .background || newValue == .inactive {
                 persistHealthState()
@@ -475,8 +350,169 @@ struct DashboardView: View {
         }
     }
 
+    private func handleKeyboardDismissDrag(_ value: DragGesture.Value) {
+        guard isKeyboardVisible else { return }
+
+        let horizontalTravel = abs(value.translation.width)
+        let verticalTravel = abs(value.translation.height)
+
+        if verticalTravel > horizontalTravel {
+            dismissKeyboard()
+        }
+    }
+
+    private var isShowingGame: Bool {
+        activePage == .home && (isGameMode || isLaunchingGame)
+    }
+
     private func dismissKeyboard() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+
+    private func dashboardScene(containerSize: CGSize, metrics: LayoutMetrics, showingGame: Bool) -> some View {
+        ZStack {
+            AppSkyBackground(theme: selectedTheme)
+
+            AppSceneBackground(theme: selectedTheme)
+                .offset(y: -metrics.backgroundSceneLift)
+
+            gameScene(showingGame: showingGame)
+
+            activeContentStack(metrics: metrics, showingGame: showingGame)
+
+            launchingGameOverlay(containerSize: containerSize, metrics: metrics)
+
+            walkthroughOverlay(metrics: metrics, showingGame: showingGame)
+        }
+        .overlay(alignment: .bottom) {
+            actionDockOverlay(metrics: metrics, showingGame: showingGame)
+        }
+        .ignoresSafeArea()
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 24)
+                .onEnded(handleKeyboardDismissDrag)
+        )
+    }
+
+    @ViewBuilder
+    private func gameScene(showingGame: Bool) -> some View {
+        if showingGame {
+            FlappyTamagotchiGameView(
+                theme: selectedTheme,
+                health: health,
+                sprite: selectedSprite,
+                clothing: selectedClothing,
+                birdVisible: !isLaunchingGame,
+                onExit: exitGameMode
+            )
+            .allowsHitTesting(isGameMode)
+            .opacity(isLaunchingGame ? gameEntryProgress : 1)
+            .scaleEffect(isLaunchingGame ? 0.96 + (gameEntryProgress * 0.04) : 1)
+            .zIndex(0)
+        }
+    }
+
+    private func activeContentStack(metrics: LayoutMetrics, showingGame: Bool) -> some View {
+        VStack(spacing: metrics.sectionSpacing) {
+            HomeTopBar(
+                metrics: metrics,
+                isBackVisible: activePage != .home,
+                isQuickActionsExpanded: quickActionsExpanded,
+                hasNotifications: !notifications.isEmpty,
+                onTitleTap: {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+                        quickActionsExpanded.toggle()
+                    }
+                },
+                onBack: goBack,
+                onWalkthrough: restartWalkthrough,
+                onInbox: { navigate(to: .inbox) }
+            )
+            .padding(.top, metrics.topPadding)
+            .padding(.horizontal, metrics.horizontalPadding)
+            .opacity(showingGame ? 0 : 1)
+            .offset(y: showingGame ? -80 : 0)
+            .allowsHitTesting(!showingGame)
+
+            mainPageContent(metrics: metrics, showingGame: showingGame)
+                .offset(y: showingGame ? 120 : 0)
+                .opacity(showingGame ? 0 : 1)
+                .allowsHitTesting(!showingGame)
+        }
+    }
+
+    @ViewBuilder
+    private func launchingGameOverlay(containerSize: CGSize, metrics: LayoutMetrics) -> some View {
+        if activePage == .home && isLaunchingGame {
+            LaunchingGameSpriteOverlay(
+                containerSize: containerSize,
+                metrics: metrics,
+                progress: gameEntryProgress,
+                health: health,
+                sprite: selectedSprite,
+                clothing: selectedClothing
+            )
+            .allowsHitTesting(false)
+            .zIndex(2)
+        }
+    }
+
+    @ViewBuilder
+    private func walkthroughOverlay(metrics: LayoutMetrics, showingGame: Bool) -> some View {
+        if isWalkthroughPresented && !showingGame {
+            WalkthroughOverlay(
+                metrics: metrics,
+                step: WalkthroughStep.allCases[walkthroughIndex],
+                currentIndex: walkthroughIndex,
+                totalCount: WalkthroughStep.allCases.count,
+                onNext: advanceWalkthrough,
+                onSkip: { finishWalkthrough() }
+            )
+            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            .zIndex(4)
+        }
+    }
+
+    @ViewBuilder
+    private func actionDockOverlay(metrics: LayoutMetrics, showingGame: Bool) -> some View {
+        if !showingGame && !isKeyboardVisible {
+            ActionDock(
+                activePage: $activePage,
+                metrics: metrics,
+                isTutorialActive: isWalkthroughPresented,
+                tutorialTarget: isWalkthroughPresented ? WalkthroughStep.allCases[walkthroughIndex].dockTarget : nil,
+                onLogTap: { navigate(to: .log) },
+                onSelectPage: handleDockSelection
+            )
+            .padding(.horizontal, metrics.horizontalPadding)
+            .padding(.top, 8)
+            .padding(.bottom, metrics.dockOuterBottomPadding)
+            .background(
+                LinearGradient(
+                    colors: [Color.clear, Color.black.opacity(0.10)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .ignoresSafeArea()
+            )
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .transaction { transaction in
+                if isWalkthroughPresented {
+                    transaction.animation = nil
+                }
+            }
+            .allowsHitTesting(!isWalkthroughPresented)
+        }
+    }
+
+    @ViewBuilder
+    private func mainPageContent(metrics: LayoutMetrics, showingGame: Bool) -> some View {
+        if activePage == .home {
+            homeView(metrics: metrics, isShowingGame: showingGame, isLaunchingGame: isLaunchingGame)
+        } else {
+            detailPage(metrics: metrics, page: activePage)
+        }
     }
 
     @ViewBuilder
@@ -726,7 +762,10 @@ struct DashboardView: View {
         guard !loadedSprites.isEmpty else { return }
         availableSprites = loadedSprites
 
-        if let existing = loadedSprites.first(where: { $0.id == selectedSprite.id }) {
+        if let selectedSpriteID = AppStatePersistence.loadSelectedSpriteID(),
+           let persistedSprite = loadedSprites.first(where: { $0.id == selectedSpriteID }) {
+            selectedSprite = persistedSprite
+        } else if let existing = loadedSprites.first(where: { $0.id == selectedSprite.id }) {
             selectedSprite = existing
         } else {
             selectedSprite = TamagotchiSpriteCatalog.preferredInitialSprite(from: loadedSprites)
@@ -940,17 +979,6 @@ struct DashboardView: View {
     private func estimatedMinutes(for session: PendingCallSession) -> Int {
         let elapsedMinutes = Int(ceil(Date().timeIntervalSince(session.startedAt) / 60))
         return max(1, elapsedMinutes == 0 ? session.fallbackMinutes : elapsedMinutes)
-    }
-
-    private func clearPendingCallIfReturnedTooQuickly() {
-        guard
-            let session = pendingCallSession,
-            Date().timeIntervalSince(session.startedAt) < 12
-        else {
-            return
-        }
-
-        clearPendingCallTracking()
     }
 
     private func clearPendingCallTracking() {
@@ -1177,7 +1205,7 @@ struct DashboardView: View {
     private func advanceWalkthrough() {
         let nextIndex = walkthroughIndex + 1
         guard nextIndex < WalkthroughStep.allCases.count else {
-            finishWalkthrough()
+            finishWalkthrough(shouldRevealQuickActions: !WalkthroughPersistence.hasCompleted)
             return
         }
 
@@ -1187,10 +1215,18 @@ struct DashboardView: View {
         }
     }
 
-    private func finishWalkthrough() {
+    private func finishWalkthrough(shouldRevealQuickActions: Bool = false) {
         WalkthroughPersistence.markCompleted()
         withAnimation(.easeInOut(duration: 0.2)) {
             isWalkthroughPresented = false
+        }
+
+        guard shouldRevealQuickActions else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+            guard !isWalkthroughPresented, activePage == .home, !isGameMode, !isLaunchingGame else { return }
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+                quickActionsExpanded = true
+            }
         }
     }
 
@@ -1366,6 +1402,7 @@ private enum AppStatePersistence {
 
     static func saveSelectedSpriteID(_ id: String) {
         UserDefaults.standard.set(id, forKey: selectedSpriteIDKey)
+        UserDefaults.standard.synchronize()
     }
 }
 
@@ -1416,7 +1453,7 @@ private enum WalkthroughStep: CaseIterable, Identifiable {
         case .health:
             return "Keep Health High"
         case .logCall:
-            return "Log Calls Fast"
+            return "Log Calls Conveniently"
         case .contacts:
             return "Add Your People"
         case .upgrades:
