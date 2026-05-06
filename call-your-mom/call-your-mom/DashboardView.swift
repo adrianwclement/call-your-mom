@@ -122,6 +122,7 @@ struct DashboardView: View {
     @State private var callLogs: [CallLogEntry] = []
     @State private var availableSprites: [TamagotchiSpriteProfile] = TamagotchiSpriteCatalog.load()
     @State private var selectedSprite: TamagotchiSpriteProfile = TamagotchiSpriteCatalog.preferredInitialSprite(from: TamagotchiSpriteCatalog.load())
+    @State private var lockedSpriteRunawayDates: [String: Date] = [:]
     @State private var selectedClothing: ClothingOption = .none
     @State private var selectedDanceSpeed: DanceSpeed = .normal
     @State private var selectedTheme: AppTheme = .meadow
@@ -149,6 +150,8 @@ struct DashboardView: View {
     private let decayTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private let minimumCallPromptDelay: TimeInterval = 20
     private let stalePendingCallInterval: TimeInterval = 30 * 60
+    private let runawayUnlockMinutes = 15
+    private let runawayRecentWindow: TimeInterval = 7 * 24 * 60 * 60
 
     private func loadSpriteLevels() {
         spriteLevels = LevelPersistence.load()
@@ -165,6 +168,8 @@ struct DashboardView: View {
     }
 
     private func awardExperienceForCall(minutes: Int) {
+        guard activeSprite != nil else { return }
+
         let xpGain = LevelCalculator.calculateExperienceGain(
             callMinutes: minutes,
             currentStreak: streakDays,
@@ -188,6 +193,10 @@ struct DashboardView: View {
 
     private var streakTier: Int {
         StreakCalculator.tier(for: streakDays)
+    }
+
+    private var activeSprite: TamagotchiSpriteProfile? {
+        isSpriteLocked(selectedSprite.id) ? nil : selectedSprite
     }
 
     var body: some View {
@@ -236,7 +245,14 @@ struct DashboardView: View {
                 restoreSettings()
                 restorePendingCallTracking()
                 presentPostCallPromptIfReady()
-            } else if newValue == .background || newValue == .inactive {
+            } else if newValue == .background {
+                markPendingCallDidLeaveApp()
+                persistHealthState()
+                persistAppState()
+                persistSettings()
+                persistPendingCallTracking()
+                syncLowHealthNotification()
+            } else if newValue == .inactive {
                 persistHealthState()
                 persistAppState()
                 persistSettings()
@@ -245,10 +261,12 @@ struct DashboardView: View {
             }
         }
         .onChange(of: health) { _, _ in
+            handleRunawayIfNeeded(now: Date())
             persistHealthState()
             syncLowHealthNotification()
         }
         .onChange(of: callLogs) { _, _ in
+            refreshRunawayUnlocks()
             AppStatePersistence.saveCallLogs(callLogs)
         }
         .onChange(of: selectedSprite) { _, _ in
@@ -303,13 +321,13 @@ struct DashboardView: View {
                 get: { postCallPrompt != nil },
                 set: { isPresented in
                     if !isPresented {
-                        clearPendingCallTracking()
+                        deferPendingCallPrompt()
                     }
                 }
             ),
             presenting: postCallPrompt
         ) { session in
-            Button("Save \(estimatedMinutes(for: session)) min") {
+            Button("Save \(loggableMinutes(for: session)) min") {
                 ButtonClickSound.perform {
                     savePendingCall(session)
                 }
@@ -323,7 +341,7 @@ struct DashboardView: View {
 
             Button("Later", role: .cancel) {
                 ButtonClickSound.perform {
-                    clearPendingCallTracking()
+                    deferPendingCallPrompt()
                 }
             }
         } message: { session in
@@ -397,11 +415,11 @@ struct DashboardView: View {
 
     @ViewBuilder
     private func gameScene(showingGame: Bool) -> some View {
-        if showingGame {
+        if showingGame, let activeSprite {
             FlappyTamagotchiGameView(
                 theme: selectedTheme,
                 health: health,
-                sprite: selectedSprite,
+                sprite: activeSprite,
                 clothing: selectedClothing,
                 birdVisible: !isLaunchingGame,
                 onExit: exitGameMode
@@ -444,13 +462,13 @@ struct DashboardView: View {
 
     @ViewBuilder
     private func launchingGameOverlay(containerSize: CGSize, metrics: LayoutMetrics) -> some View {
-        if activePage == .home && isLaunchingGame {
+        if activePage == .home && isLaunchingGame, let activeSprite {
             LaunchingGameSpriteOverlay(
                 containerSize: containerSize,
                 metrics: metrics,
                 progress: gameEntryProgress,
                 health: health,
-                sprite: selectedSprite,
+                sprite: activeSprite,
                 clothing: selectedClothing
             )
             .allowsHitTesting(false)
@@ -531,9 +549,13 @@ struct DashboardView: View {
                         selectedClothing: selectedClothing,
                         health: health,
                         selectedDanceSpeed: selectedDanceSpeed,
+                        lockedSpriteRunawayDates: lockedSpriteRunawayDates,
+                        unlockRequiredMinutes: runawayUnlockMinutes,
+                        unlockProgress: unlockProgress,
                         onSelectSprite: { sprite in
-                            selectedSprite = sprite
-                        }, spriteLevels: spriteLevels
+                            selectSpriteIfAvailable(sprite)
+                        },
+                        spriteLevels: spriteLevels
                     )
                     .padding(.horizontal, metrics.horizontalPadding)
                     .padding(.bottom, metrics.contentBottomPadding)
@@ -544,7 +566,7 @@ struct DashboardView: View {
                         VStack(spacing: metrics.sectionSpacing) {
                             if quickActionsExpanded {
                                 QuickActionsFlyout(
-                                    onCallNow: handleCallNowQuickAction,
+                                    onPlay: handlePlayQuickAction,
                                     onSetReminder: handleSetReminderQuickAction,
                                     onChooseContact: handleChooseContactQuickAction
                                 )
@@ -557,16 +579,23 @@ struct DashboardView: View {
                                 isTutorialHighlighted: isWalkthroughPresented && WalkthroughStep.allCases[walkthroughIndex].focus == .healthBar
                             )
 
-                            IntegratedTamagotchiStage(
-                                health: health,
-                                sprite: selectedSprite,
-                                clothing: selectedClothing,
-                                danceSpeed: selectedDanceSpeed,
-                                currentSpriteLevel: currentSpriteLevel,
-                                isGameMode: isShowingGame,
-                                hidesSprite: isLaunchingGame,
-                                onLaunchGame: enterGameMode
-                            )
+                            if let activeSprite {
+                                IntegratedTamagotchiStage(
+                                    health: health,
+                                    sprite: activeSprite,
+                                    clothing: selectedClothing,
+                                    danceSpeed: selectedDanceSpeed,
+                                    currentSpriteLevel: currentSpriteLevel,
+                                    isGameMode: isShowingGame,
+                                    hidesSprite: isLaunchingGame,
+                                    onCallNow: handleCallNowQuickAction
+                                )
+                            } else {
+                                EmptyTamagotchiStage(
+                                    requiredMinutes: runawayUnlockMinutes,
+                                    onLogCall: { navigate(to: .log) }
+                                )
+                            }
 
                             Spacer(minLength: 0)
                         }
@@ -580,7 +609,7 @@ struct DashboardView: View {
                     .frame(minHeight: metrics.minContentHeight)
 
                     PixelGardenPlaygroundView(
-                        sprites: availableSprites,
+                        sprites: availableSprites.filter { !isSpriteLocked($0.id) },
                         selectedClothing: selectedClothing
                     )
                     .padding(.horizontal, metrics.horizontalPadding)
@@ -625,11 +654,87 @@ struct DashboardView: View {
         return contacts.first(where: { $0.id == preferredContactID }) ?? contacts.first
     }
 
+    private func isSpriteLocked(_ spriteID: String) -> Bool {
+        lockedSpriteRunawayDates[spriteID] != nil
+    }
+
+    private func unlockProgress(for sprite: TamagotchiSpriteProfile) -> Int {
+        guard let runawayDate = lockedSpriteRunawayDates[sprite.id] else {
+            return runawayUnlockMinutes
+        }
+
+        return min(runawayUnlockMinutes, recentLoggedMinutes(since: runawayDate, now: Date()))
+    }
+
+    private func recentLoggedMinutes(since runawayDate: Date, now: Date) -> Int {
+        let recentCutoff = now.addingTimeInterval(-runawayRecentWindow)
+        let unlockCutoff = max(runawayDate, recentCutoff)
+        return callLogs
+            .filter { $0.loggedAt >= unlockCutoff && $0.loggedAt <= now }
+            .reduce(0) { $0 + $1.minutes }
+    }
+
+    private func refreshRunawayUnlocks(now: Date = Date()) {
+        guard !lockedSpriteRunawayDates.isEmpty else { return }
+
+        var updatedRunawayDates = lockedSpriteRunawayDates
+        for (spriteID, runawayDate) in lockedSpriteRunawayDates {
+            if recentLoggedMinutes(since: runawayDate, now: now) >= runawayUnlockMinutes {
+                updatedRunawayDates.removeValue(forKey: spriteID)
+            }
+        }
+
+        guard updatedRunawayDates != lockedSpriteRunawayDates else { return }
+        lockedSpriteRunawayDates = updatedRunawayDates
+        AppStatePersistence.saveLockedSpriteRunawayDates(updatedRunawayDates)
+        selectReplacementSpriteIfNeeded(resetHealth: health <= 0, now: now)
+    }
+
+    private func selectSpriteIfAvailable(_ sprite: TamagotchiSpriteProfile) {
+        guard !isSpriteLocked(sprite.id) else { return }
+        selectedSprite = sprite
+        updateCurrentSpriteLevel()
+    }
+
+    private func selectReplacementSpriteIfNeeded(excluding runawaySpriteID: String? = nil, resetHealth: Bool, now: Date) {
+        guard isSpriteLocked(selectedSprite.id) || runawaySpriteID == selectedSprite.id else { return }
+        guard let replacement = availableSprites.first(where: { sprite in
+            sprite.id != runawaySpriteID && !isSpriteLocked(sprite.id)
+        }) else {
+            return
+        }
+
+        selectedSprite = replacement
+        updateCurrentSpriteLevel()
+        if resetHealth {
+            health = HealthPersistence.defaultHealth
+            lastHealthUpdatedAt = now
+            persistHealthState()
+        }
+    }
+
+    private func handleRunawayIfNeeded(now: Date) {
+        guard health <= 0 else { return }
+        guard !isSpriteLocked(selectedSprite.id) else {
+            exitGameMode()
+            selectReplacementSpriteIfNeeded(resetHealth: true, now: now)
+            return
+        }
+
+        lockedSpriteRunawayDates[selectedSprite.id] = now
+        AppStatePersistence.saveLockedSpriteRunawayDates(lockedSpriteRunawayDates)
+        exitGameMode()
+        selectReplacementSpriteIfNeeded(excluding: selectedSprite.id, resetHealth: true, now: now)
+        lastHealthUpdatedAt = now
+        persistHealthState()
+    }
+
     private func logCall(name: String, minutes: Int) {
         applyElapsedDecay(now: Date())
         callsLogged += 1
         callLogs.insert(CallLogEntry(name: name, minutes: minutes, loggedAt: Date()), at: 0)
         refreshStreakDays()
+        refreshRunawayUnlocks()
 
         let durationHealing = min(max(Double(minutes) * 1.5, 18), 45)
         let streakBonus = Double(streakTier * 4)
@@ -647,6 +752,7 @@ struct DashboardView: View {
         guard updatedHealth != health || lastHealthUpdatedAt != now else { return }
         health = updatedHealth
         lastHealthUpdatedAt = now
+        handleRunawayIfNeeded(now: now)
     }
 
     private func restorePersistedHealth() {
@@ -654,6 +760,7 @@ struct DashboardView: View {
         callsLogged = persisted.callsLogged
         health = HealthPersistence.decayedHealth(from: persisted.health, since: persisted.updatedAt, now: Date())
         lastHealthUpdatedAt = Date()
+        handleRunawayIfNeeded(now: lastHealthUpdatedAt)
         wasBelowLowHealthThreshold = health <= LocalNotificationManager.lowHealthThreshold
         refreshStreakDays()
     }
@@ -770,22 +877,29 @@ struct DashboardView: View {
         } else {
             selectedSprite = TamagotchiSpriteCatalog.preferredInitialSprite(from: loadedSprites)
         }
+        updateCurrentSpriteLevel()
+        selectReplacementSpriteIfNeeded(resetHealth: health <= 0, now: Date())
     }
 
     private func restoreAppState() {
         callLogs = AppStatePersistence.loadCallLogs()
+        lockedSpriteRunawayDates = AppStatePersistence.loadLockedSpriteRunawayDates()
+        refreshRunawayUnlocks()
         restoreSelectedSprite()
+        selectReplacementSpriteIfNeeded(resetHealth: true, now: Date())
     }
 
     private func persistAppState() {
         AppStatePersistence.saveCallLogs(callLogs)
         AppStatePersistence.saveSelectedSpriteID(selectedSprite.id)
+        AppStatePersistence.saveLockedSpriteRunawayDates(lockedSpriteRunawayDates)
     }
 
     private func restoreSelectedSprite() {
         guard let selectedSpriteID = AppStatePersistence.loadSelectedSpriteID() else { return }
         guard let persistedSprite = availableSprites.first(where: { $0.id == selectedSpriteID }) else { return }
         selectedSprite = persistedSprite
+        updateCurrentSpriteLevel()
     }
 
     private func refreshStreakDays() {
@@ -883,6 +997,8 @@ struct DashboardView: View {
             clearPendingCallTracking()
             callFailureMessage = "This device or simulator can't place phone calls from the app. Try again on an iPhone with calling available."
         }
+
+        discardUnconfirmedPendingCallAfterDelay(sessionID: pendingCallSession?.id)
     }
 
     private func handleCallNowQuickAction() {
@@ -905,6 +1021,19 @@ struct DashboardView: View {
         }
 
         callContact(preferredContact)
+    }
+
+    private func handlePlayQuickAction() {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+            quickActionsExpanded = false
+        }
+
+        guard activeSprite != nil else {
+            navigate(to: .log)
+            return
+        }
+
+        enterGameMode()
     }
 
     private func handleSetReminderQuickAction() {
@@ -951,6 +1080,11 @@ struct DashboardView: View {
             return
         }
 
+        guard session.didLeaveApp else {
+            discardUnconfirmedPendingCallIfNeeded()
+            return
+        }
+
         let secondsSinceCallStarted = Date().timeIntervalSince(session.startedAt)
         guard secondsSinceCallStarted >= minimumCallPromptDelay else {
             DispatchQueue.main.asyncAfter(deadline: .now() + (minimumCallPromptDelay - secondsSinceCallStarted)) {
@@ -960,25 +1094,65 @@ struct DashboardView: View {
             return
         }
 
+        let promptSession = session.withFrozenPromptMinutes(loggableMinutes(for: session))
+        pendingCallSession = promptSession
+        persistPendingCallTracking()
         selectedLogContactID = session.contactID
-        logMinutes = String(estimatedMinutes(for: session))
-        postCallPrompt = session
+        logMinutes = String(loggableMinutes(for: promptSession))
+        postCallPrompt = promptSession
     }
 
     private func savePendingCall(_ session: PendingCallSession) {
-        logCall(name: session.contactName, minutes: estimatedMinutes(for: session))
+        logCall(name: session.contactName, minutes: loggableMinutes(for: session))
     }
 
     private func reviewPendingCall(_ session: PendingCallSession) {
         selectedLogContactID = session.contactID
-        logMinutes = String(estimatedMinutes(for: session))
+        logMinutes = String(loggableMinutes(for: session))
         postCallPrompt = nil
         navigate(to: .log)
+    }
+
+    private func loggableMinutes(for session: PendingCallSession) -> Int {
+        if let promptMinutes = session.promptMinutes {
+            return max(1, promptMinutes)
+        }
+
+        return estimatedMinutes(for: session)
     }
 
     private func estimatedMinutes(for session: PendingCallSession) -> Int {
         let elapsedMinutes = Int(ceil(Date().timeIntervalSince(session.startedAt) / 60))
         return max(1, elapsedMinutes == 0 ? session.fallbackMinutes : elapsedMinutes)
+    }
+
+    private func deferPendingCallPrompt() {
+        postCallPrompt = nil
+        persistPendingCallTracking()
+    }
+
+    private func markPendingCallDidLeaveApp() {
+        guard var session = pendingCallSession, !session.didLeaveApp else { return }
+        session.didLeaveApp = true
+        pendingCallSession = session
+        persistPendingCallTracking()
+    }
+
+    private func discardUnconfirmedPendingCallAfterDelay(sessionID: UUID?) {
+        guard let sessionID else { return }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + minimumCallPromptDelay) {
+            guard scenePhase == .active else { return }
+            guard pendingCallSession?.id == sessionID else { return }
+            discardUnconfirmedPendingCallIfNeeded()
+        }
+    }
+
+    private func discardUnconfirmedPendingCallIfNeeded() {
+        guard let session = pendingCallSession else { return }
+        guard !session.didLeaveApp else { return }
+        guard Date().timeIntervalSince(session.startedAt) >= minimumCallPromptDelay else { return }
+        clearPendingCallTracking()
     }
 
     private func clearPendingCallTracking() {
@@ -1252,7 +1426,7 @@ struct DashboardView: View {
     }
 
     private func enterGameMode() {
-        guard activePage == .home, !isGameMode, !isLaunchingGame else { return }
+        guard activePage == .home, activeSprite != nil, !isGameMode, !isLaunchingGame else { return }
         quickActionsExpanded = false
         gameEntryProgress = 0
 
@@ -1320,23 +1494,56 @@ private struct PendingCallSession: Codable, Identifiable {
     let contactName: String
     let startedAt: Date
     let fallbackMinutes: Int
+    var didLeaveApp: Bool
+    var promptMinutes: Int?
 
     init(
         id: UUID = UUID(),
         contactID: UUID,
         contactName: String,
         startedAt: Date,
-        fallbackMinutes: Int
+        fallbackMinutes: Int,
+        didLeaveApp: Bool = false,
+        promptMinutes: Int? = nil
     ) {
         self.id = id
         self.contactID = contactID
         self.contactName = contactName
         self.startedAt = startedAt
         self.fallbackMinutes = fallbackMinutes
+        self.didLeaveApp = didLeaveApp
+        self.promptMinutes = promptMinutes
     }
 
     func isStale(maxAge: TimeInterval, now: Date = Date()) -> Bool {
         now.timeIntervalSince(startedAt) > maxAge
+    }
+
+    func withFrozenPromptMinutes(_ minutes: Int) -> PendingCallSession {
+        var session = self
+        session.promptMinutes = promptMinutes ?? max(1, minutes)
+        return session
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case contactID
+        case contactName
+        case startedAt
+        case fallbackMinutes
+        case didLeaveApp
+        case promptMinutes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        contactID = try container.decode(UUID.self, forKey: .contactID)
+        contactName = try container.decode(String.self, forKey: .contactName)
+        startedAt = try container.decode(Date.self, forKey: .startedAt)
+        fallbackMinutes = try container.decode(Int.self, forKey: .fallbackMinutes)
+        didLeaveApp = try container.decodeIfPresent(Bool.self, forKey: .didLeaveApp) ?? false
+        promptMinutes = try container.decodeIfPresent(Int.self, forKey: .promptMinutes)
     }
 }
 
@@ -1379,6 +1586,7 @@ private enum WalkthroughPersistence {
 private enum AppStatePersistence {
     private static let callLogsKey = "appState.callLogs"
     private static let selectedSpriteIDKey = "appState.selectedSpriteID"
+    private static let lockedSpriteRunawayDatesKey = "appState.lockedSpriteRunawayDates"
 
     static func loadCallLogs() -> [CallLogEntry] {
         guard
@@ -1403,6 +1611,22 @@ private enum AppStatePersistence {
     static func saveSelectedSpriteID(_ id: String) {
         UserDefaults.standard.set(id, forKey: selectedSpriteIDKey)
         UserDefaults.standard.synchronize()
+    }
+
+    static func loadLockedSpriteRunawayDates() -> [String: Date] {
+        guard
+            let data = UserDefaults.standard.data(forKey: lockedSpriteRunawayDatesKey),
+            let dates = try? JSONDecoder().decode([String: Date].self, from: data)
+        else {
+            return [:]
+        }
+
+        return dates
+    }
+
+    static func saveLockedSpriteRunawayDates(_ dates: [String: Date]) {
+        guard let encoded = try? JSONEncoder().encode(dates) else { return }
+        UserDefaults.standard.set(encoded, forKey: lockedSpriteRunawayDatesKey)
     }
 }
 
@@ -1924,17 +2148,17 @@ private struct FloatingHealthBar: View {
 }
 
 private struct QuickActionsFlyout: View {
-    let onCallNow: () -> Void
+    let onPlay: () -> Void
     let onSetReminder: () -> Void
     let onChooseContact: () -> Void
 
     var body: some View {
         VStack(spacing: 10) {
             ExpandableActionRow(
-                icon: "phone.fill",
-                title: "Call now",
-                subtitle: "Jump straight into a check-in.",
-                action: onCallNow
+                icon: "play.fill",
+                title: "Play",
+                subtitle: "Jump straight into the game.",
+                action: onPlay
             )
             ExpandableActionRow(
                 icon: "bell.fill",
@@ -2111,7 +2335,7 @@ private struct IntegratedTamagotchiStage: View {
     let currentSpriteLevel: SpriteLevel
     let isGameMode: Bool
     let hidesSprite: Bool
-    let onLaunchGame: () -> Void
+    let onCallNow: () -> Void
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -2137,11 +2361,11 @@ private struct IntegratedTamagotchiStage: View {
                 VStack {
                     Spacer()
 
-                    Button(action: ButtonClickSound.action(onLaunchGame)) {
+                    Button(action: ButtonClickSound.action(onCallNow)) {
                         HStack(spacing: 8) {
-                            Image(systemName: "play.fill")
+                            Image(systemName: "phone.fill")
                                 .font(.system(size: 13, weight: .black))
-                            Text("Play")
+                            Text("Call now")
                                 .font(.system(size: 14, weight: .black, design: .rounded))
                         }
                         .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
@@ -2162,12 +2386,68 @@ private struct IntegratedTamagotchiStage: View {
 
 }
 
+private struct EmptyTamagotchiStage: View {
+    let requiredMinutes: Int
+    let onLogCall: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(Color.white.opacity(0.30))
+                .frame(height: 250)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .stroke(Color.white.opacity(0.38), lineWidth: 1)
+                )
+
+            VStack(spacing: 12) {
+                Image(systemName: "house")
+                    .font(.system(size: 48, weight: .black))
+                    .foregroundStyle(Color.white.opacity(0.86))
+
+                VStack(spacing: 4) {
+                    Text("No Tamagotchi at home")
+                        .font(.system(size: 19, weight: .black, design: .rounded))
+                        .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                    Text("Log \(requiredMinutes) recent minutes to bring one back.")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color(red: 0.27, green: 0.40, blue: 0.47))
+                        .multilineTextAlignment(.center)
+                }
+
+                Button(action: ButtonClickSound.action(onLogCall)) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 13, weight: .black))
+                        Text("Log call")
+                            .font(.system(size: 14, weight: .black, design: .rounded))
+                    }
+                    .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 11)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.white.opacity(0.84))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 38)
+        }
+        .frame(height: 300)
+    }
+}
+
 private struct SpriteSelectionGridView: View {
     let sprites: [TamagotchiSpriteProfile]
     let selectedSprite: TamagotchiSpriteProfile
     let selectedClothing: ClothingOption
     let health: Double
     let selectedDanceSpeed: DanceSpeed
+    let lockedSpriteRunawayDates: [String: Date]
+    let unlockRequiredMinutes: Int
+    let unlockProgress: (TamagotchiSpriteProfile) -> Int
     let onSelectSprite: (TamagotchiSpriteProfile) -> Void
     let spriteLevels: [String: SpriteLevel]
 
@@ -2182,24 +2462,54 @@ private struct SpriteSelectionGridView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVGrid(columns: columns, spacing: 12) {
                     ForEach(sprites) { sprite in
+                        let isLocked = lockedSpriteRunawayDates[sprite.id] != nil
+                        let progress = unlockProgress(sprite)
+
                         Button(action: ButtonClickSound.action { onSelectSprite(sprite) }) {
                             VStack(spacing: 8) {
-                                PixelTamagotchi(
-                                    health: health,
-                                    sprite: sprite,
-                                    clothing: selectedClothing,
-                                    artSize: 96,
-                                    showsLabels: false,
-                                    showsBadge: false,
-                                    danceSpeed: selectedDanceSpeed,
-                                    level: spriteLevels[sprite.id],
-                                    showLevel: false,
-                                    showsLevelProgress: false
-                                )
+                                ZStack {
+                                    PixelTamagotchi(
+                                        health: health,
+                                        sprite: sprite,
+                                        clothing: selectedClothing,
+                                        artSize: 96,
+                                        showsLabels: false,
+                                        showsBadge: false,
+                                        danceSpeed: selectedDanceSpeed,
+                                        level: spriteLevels[sprite.id],
+                                        showLevel: false,
+                                        showsLevelProgress: false
+                                    )
+                                    .opacity(isLocked ? 0.34 : 1)
+
+                                    if isLocked {
+                                        Circle()
+                                            .fill(Color.black.opacity(0.72))
+                                            .frame(width: 38, height: 38)
+                                            .overlay {
+                                                Image(systemName: "lock.fill")
+                                                    .font(.system(size: 16, weight: .black))
+                                                    .foregroundStyle(.white)
+                                            }
+                                    }
+                                }
+
                                 Text(sprite.displayName)
                                     .font(.system(size: 13, weight: .bold, design: .rounded))
                                     .foregroundStyle(Color(red: 0.09, green: 0.16, blue: 0.26))
                                     .lineLimit(1)
+
+                                if isLocked {
+                                    Text("Ran away")
+                                        .font(.system(size: 11, weight: .black, design: .rounded))
+                                        .foregroundStyle(Color(red: 0.88, green: 0.26, blue: 0.32))
+                                        .lineLimit(1)
+                                    Text("\(progress)/\(unlockRequiredMinutes) recent min")
+                                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                                        .foregroundStyle(Color(red: 0.37, green: 0.45, blue: 0.52))
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.8)
+                                }
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
@@ -2213,6 +2523,7 @@ private struct SpriteSelectionGridView: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .disabled(isLocked)
                     }
                 }
                 .padding(.bottom, 8)
@@ -2583,6 +2894,8 @@ private struct FlappyTamagotchiGameView: View {
     @State private var birdVelocity: CGFloat = 0
     @State private var pipes: [FlappyPipe] = []
     @State private var score = 0
+    @State private var highScore = FlappyHighScorePersistence.load()
+    @State private var didSetNewHighScore = false
     @State private var hasStarted = false
     @State private var isGameOver = false
     @State private var lastTick = Date()
@@ -2621,6 +2934,7 @@ private struct FlappyTamagotchiGameView: View {
                     HStack(alignment: .center) {
                         ScorePill(score: score)
                         Spacer()
+                        HighScorePill(score: highScore)
                         Button(action: ButtonClickSound.action(onExit)) {
                             Image(systemName: "xmark")
                                 .font(.system(size: 15, weight: .black))
@@ -2642,7 +2956,8 @@ private struct FlappyTamagotchiGameView: View {
                     } else if isGameOver {
                         GamePromptCard(
                             title: "Try Again",
-                            subtitle: "Tap to restart the run."
+                            subtitle: didSetNewHighScore ? "New High Score: \(highScore)" : "High Score: \(highScore)",
+                            detail: "Tap to restart the run."
                         )
                     }
 
@@ -2709,6 +3024,7 @@ private struct FlappyTamagotchiGameView: View {
             if !pipes[index].didScore, pipes[index].x + pipeWidth / 2 < birdX {
                 pipes[index].didScore = true
                 score += 1
+                updateHighScoreIfNeeded()
             }
         }
 
@@ -2755,6 +3071,8 @@ private struct FlappyTamagotchiGameView: View {
         birdY = FlappyGameLayout.birdSpawnY(for: size)
         birdVelocity = 0
         score = 0
+        highScore = FlappyHighScorePersistence.load()
+        didSetNewHighScore = false
         hasStarted = false
         isGameOver = false
         lastTick = Date()
@@ -2778,6 +3096,13 @@ private struct FlappyTamagotchiGameView: View {
 
     private func randomPipeSpacing(base: CGFloat) -> CGFloat {
         base + CGFloat.random(in: 18...92)
+    }
+
+    private func updateHighScoreIfNeeded() {
+        guard score > highScore else { return }
+        highScore = score
+        didSetNewHighScore = true
+        FlappyHighScorePersistence.save(score)
     }
 }
 
@@ -2848,6 +3173,7 @@ private enum FlappyGameLayout {
 private struct GamePromptCard: View {
     let title: String
     let subtitle: String
+    var detail: String? = nil
 
     var body: some View {
         VStack(spacing: 6) {
@@ -2858,6 +3184,14 @@ private struct GamePromptCard: View {
             Text(subtitle)
                 .font(.system(size: 13, weight: .bold, design: .rounded))
                 .foregroundStyle(Color(red: 0.34, green: 0.44, blue: 0.50))
+                .multilineTextAlignment(.center)
+
+            if let detail {
+                Text(detail)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color(red: 0.46, green: 0.54, blue: 0.60))
+                    .multilineTextAlignment(.center)
+            }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
@@ -2865,6 +3199,24 @@ private struct GamePromptCard: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color.white.opacity(0.82))
         )
+    }
+}
+
+private struct HighScorePill: View {
+    let score: Int
+
+    var body: some View {
+        Text("HS: \(score)")
+            .font(.system(size: 14, weight: .black, design: .rounded))
+            .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(0.82))
+            )
     }
 }
 
@@ -2939,6 +3291,18 @@ private struct FlappyPipe: Identifiable {
 
     func gapHeight(for screenHeight: CGFloat) -> CGFloat {
         max(168, screenHeight * gapHeightRatio)
+    }
+}
+
+private enum FlappyHighScorePersistence {
+    private static let storageKey = "flappy.highScore"
+
+    static func load() -> Int {
+        max(UserDefaults.standard.integer(forKey: storageKey), 0)
+    }
+
+    static func save(_ score: Int) {
+        UserDefaults.standard.set(max(score, 0), forKey: storageKey)
     }
 }
 
