@@ -82,22 +82,51 @@ struct NotificationPreferences: Codable, Equatable {
 struct AppSettings: Codable, Equatable {
     var contacts: [AppContact]
     var preferredContactID: UUID?
+    var spriteContactAssignments: [String: UUID]
     var defaultCallMinutes: Int
     var notificationPreferences: NotificationPreferences
+
+    private enum CodingKeys: String, CodingKey {
+        case contacts
+        case preferredContactID
+        case spriteContactAssignments
+        case defaultCallMinutes
+        case notificationPreferences
+    }
+
+    init(
+        contacts: [AppContact],
+        preferredContactID: UUID?,
+        spriteContactAssignments: [String: UUID] = [:],
+        defaultCallMinutes: Int,
+        notificationPreferences: NotificationPreferences
+    ) {
+        self.contacts = contacts
+        self.preferredContactID = preferredContactID
+        self.spriteContactAssignments = spriteContactAssignments
+        self.defaultCallMinutes = defaultCallMinutes
+        self.notificationPreferences = notificationPreferences
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        contacts = try container.decodeIfPresent([AppContact].self, forKey: .contacts) ?? []
+        preferredContactID = try container.decodeIfPresent(UUID.self, forKey: .preferredContactID)
+        spriteContactAssignments = try container.decodeIfPresent([String: UUID].self, forKey: .spriteContactAssignments) ?? [:]
+        defaultCallMinutes = try container.decodeIfPresent(Int.self, forKey: .defaultCallMinutes) ?? 15
+        notificationPreferences = try container.decodeIfPresent(NotificationPreferences.self, forKey: .notificationPreferences) ?? NotificationPreferences()
+    }
 }
 
 enum SettingsPersistence {
     private static let defaults = UserDefaults.standard
     private static let storageKey = "settings.appSettings"
-
-    private static let fallbackContacts = [
-        AppContact(name: "Mom"),
-        AppContact(name: "Dad")
-    ]
+    private static let defaultContactPromptKey = "settings.defaultContactPrompt.hasShown"
 
     static let defaultSettings = AppSettings(
-        contacts: fallbackContacts,
-        preferredContactID: fallbackContacts.first?.id,
+        contacts: [],
+        preferredContactID: nil,
+        spriteContactAssignments: [:],
         defaultCallMinutes: 15,
         notificationPreferences: NotificationPreferences()
     )
@@ -111,10 +140,13 @@ enum SettingsPersistence {
             return defaultSettings
         }
 
-        let contacts = decoded.contacts
+        let contacts = removingUntouchedStarterContacts(from: decoded.contacts)
         let preferredContactID = contacts.contains(where: { $0.id == decoded.preferredContactID })
             ? decoded.preferredContactID
             : contacts.first?.id
+        let contactIDs = Set(contacts.map(\.id))
+        let spriteContactAssignments = migratedSpriteContactAssignments(decoded.spriteContactAssignments)
+            .filter { contactIDs.contains($0.value) }
         let defaultCallMinutes = min(max(decoded.defaultCallMinutes, 1), 240)
         let reminderHour = min(max(decoded.notificationPreferences.reminderHour, 0), 23)
         let reminderMinute = min(max(decoded.notificationPreferences.reminderMinute, 0), 59)
@@ -122,6 +154,7 @@ enum SettingsPersistence {
         return AppSettings(
             contacts: contacts,
             preferredContactID: preferredContactID,
+            spriteContactAssignments: spriteContactAssignments,
             defaultCallMinutes: defaultCallMinutes,
             notificationPreferences: NotificationPreferences(
                 dailyRemindersEnabled: decoded.notificationPreferences.dailyRemindersEnabled,
@@ -136,7 +169,45 @@ enum SettingsPersistence {
     }
 
     static func save(_ settings: AppSettings) {
-        guard let encoded = try? JSONEncoder().encode(settings) else { return }
+        let sanitizedSettings = AppSettings(
+            contacts: settings.contacts,
+            preferredContactID: settings.preferredContactID,
+            spriteContactAssignments: migratedSpriteContactAssignments(settings.spriteContactAssignments),
+            defaultCallMinutes: settings.defaultCallMinutes,
+            notificationPreferences: settings.notificationPreferences
+        )
+        guard let encoded = try? JSONEncoder().encode(sanitizedSettings) else { return }
         defaults.set(encoded, forKey: storageKey)
+    }
+
+    static var hasPromptedForDefaultContact: Bool {
+        defaults.bool(forKey: defaultContactPromptKey)
+    }
+
+    static func markPromptedForDefaultContact() {
+        defaults.set(true, forKey: defaultContactPromptKey)
+    }
+
+    private static func migratedSpriteContactAssignments(_ assignments: [String: UUID]) -> [String: UUID] {
+        var migrated = assignments
+        for (legacyID, canonicalID) in ["t1": "slime", "t2": "cecil"] {
+            if let legacyContactID = assignments[legacyID], assignments[canonicalID] == nil {
+                migrated[canonicalID] = legacyContactID
+            }
+            migrated.removeValue(forKey: legacyID)
+        }
+        return migrated
+    }
+
+    private static func removingUntouchedStarterContacts(from contacts: [AppContact]) -> [AppContact] {
+        guard contacts.count == 2 else { return contacts }
+
+        let starterNames = Set(["Mom", "Dad"])
+        let contactNames = Set(contacts.map(\.name))
+        let allStarterContactsAreUntouched = contacts.allSatisfy { contact in
+            contact.phoneNumber?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+        }
+
+        return contactNames == starterNames && allStarterContactsAreUntouched ? [] : contacts
     }
 }

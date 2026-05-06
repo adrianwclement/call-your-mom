@@ -1,6 +1,6 @@
 {
-  "id": "t2",
-  "displayName": "Cecil",
+  "id": "slime",
+  "displayName": "Slime",
   "badgeSymbol": "star.fill",
   "badgeColor": "#FDE37B",
   "highlightColor": "#FF7A59",
@@ -10,7 +10,7 @@
     "low": "#A07CCF"
   },
   "atlas": {
-    "image": "t2",
+    "image": "slime",
     "frameSize": { "width": 1024, "height": 1024 },
     "idleAnimation": {
       "fps": 10,
@@ -18,8 +18,7 @@
         { "column": 0, "row": 0 },
         { "column": 1, "row": 0 },
         { "column": 0, "row": 1 },
-        { "column": 1, "row": 1 },
-        { "column": 0, "row": 2 }
+        { "column": 1, "row": 1 }
       ]
     }
   }

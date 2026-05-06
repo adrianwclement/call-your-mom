@@ -60,8 +60,11 @@ enum TamagotchiSpriteCatalog {
     }
 
     static func preferredInitialSprite(from sprites: [TamagotchiSpriteProfile]) -> TamagotchiSpriteProfile {
-        if let t1Sprite = sprites.first(where: { $0.id == "t1" }) {
-            return t1Sprite
+        if let slimeSprite = sprites.first(where: { $0.id == "slime" }) {
+            return slimeSprite
+        }
+        if let legacySlimeSprite = sprites.first(where: { $0.id == "t1" }) {
+            return legacySlimeSprite
         }
         return sprites.first ?? defaultSprite
     }

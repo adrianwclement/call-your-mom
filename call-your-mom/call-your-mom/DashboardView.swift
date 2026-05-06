@@ -12,6 +12,12 @@ import AVFoundation
 internal import Combine
 
 enum ButtonClickSound {
+    private static let hapticGenerator: UIImpactFeedbackGenerator = {
+        let generator = UIImpactFeedbackGenerator(style: .light)
+        generator.prepare()
+        return generator
+    }()
+
     private static let player: AVAudioPlayer? = {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("call-your-mom-low-button-click-v2.wav")
@@ -32,8 +38,12 @@ enum ButtonClickSound {
     }
 
     static func perform(_ action: () -> Void) {
-        play()
+        hapticGenerator.impactOccurred(intensity: 0.7)
+        hapticGenerator.prepare()
         action()
+        DispatchQueue.main.async {
+            play()
+        }
     }
 
     static func action(_ action: @escaping () -> Void) -> () -> Void {
@@ -108,10 +118,14 @@ struct DashboardView: View {
     @State private var pageHistory: [HomePage] = []
     @State private var quickActionsExpanded = false
     @State private var health = HealthPersistence.defaultHealth
+    @State private var currentSpriteHealthIsActivated = false
+    @State private var hasRestoredCurrentSpriteHealth = false
+    @State private var isHibernating = false
     @State private var callsLogged = HealthPersistence.defaultCallsLogged
     @State private var contacts = SettingsPersistence.defaultSettings.contacts
     @State private var preferredContactID = SettingsPersistence.defaultSettings.preferredContactID
     @State private var selectedLogContactID = SettingsPersistence.defaultSettings.preferredContactID
+    @State private var spriteContactAssignments = SettingsPersistence.defaultSettings.spriteContactAssignments
     @State private var pendingContactName = ""
     @State private var logMinutes: String = ""
     @State private var defaultCallMinutes = SettingsPersistence.defaultSettings.defaultCallMinutes
@@ -124,6 +138,7 @@ struct DashboardView: View {
     @State private var selectedSprite: TamagotchiSpriteProfile = TamagotchiSpriteCatalog.preferredInitialSprite(from: TamagotchiSpriteCatalog.load())
     @State private var selectedClothing: ClothingOption = .none
     @State private var selectedDanceSpeed: DanceSpeed = .normal
+    @State private var currencyBalances = EconomyPersistence.loadBalances()
     @State private var selectedTheme: AppTheme = .meadow
     @State private var streakDays: Int = 0
     @State private var isContactPickerPresented = false
@@ -134,6 +149,7 @@ struct DashboardView: View {
     @State private var reminderDraftDate = Date()
     @State private var isDefaultContactPickerPresented = false
     @State private var selectedDefaultContactDraftID: UUID?
+    @State private var isDefaultContactPromptPresented = false
     @State private var isWalkthroughPresented = false
     @State private var walkthroughIndex = 0
     @State private var isGameMode = false
@@ -141,14 +157,18 @@ struct DashboardView: View {
     @State private var gameEntryProgress: CGFloat = 0
     @State private var activeHomePanelIndex = 1
     @State private var homeDragTranslation: CGFloat = 0
+    @State private var isHomePanelSwipeInProgress = false
+    @State private var lastHomePanelSwipeEndedAt = Date.distantPast
     @State private var spriteLevels: [String: SpriteLevel] = [:]
     @State private var currentSpriteLevel: SpriteLevel = SpriteLevel(spriteID: "default")
     @State private var showLevelUpNotification = false
     @State private var lastLevelUpValue = 1
+    @State private var levelUpNotificationSequence = 0
     @State private var isKeyboardVisible = false
     private let decayTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private let minimumCallPromptDelay: TimeInterval = 20
     private let stalePendingCallInterval: TimeInterval = 30 * 60
+    private let homePanelSwipeTapSuppressionInterval: TimeInterval = 0.25
 
     private func loadSpriteLevels() {
         spriteLevels = LevelPersistence.load()
@@ -159,31 +179,45 @@ struct DashboardView: View {
         currentSpriteLevel = spriteLevels[selectedSprite.id] ?? SpriteLevel(spriteID: selectedSprite.id)
     }
 
+    private func resetCurrentSpriteLevel() {
+        if spriteLevels.isEmpty {
+            spriteLevels = LevelPersistence.load()
+        }
+        currentSpriteLevel = SpriteLevel(spriteID: selectedSprite.id)
+        saveCurrentSpriteLevel()
+        lastLevelUpValue = 1
+        showLevelUpNotification = false
+    }
+
     private func saveCurrentSpriteLevel() {
         spriteLevels[currentSpriteLevel.spriteID] = currentSpriteLevel
         LevelPersistence.save(spriteLevels)
     }
 
-    private func awardExperienceForCall(minutes: Int) {
-        let xpGain = LevelCalculator.calculateExperienceGain(
-            callMinutes: minutes,
-            currentStreak: streakDays,
-            healthPercent: health
-        )
-        
-        let didLevelUp = currentSpriteLevel.addExperience(xpGain)
+    private func awardExperienceForFeeding(_ option: FeedingOption) {
+        let didLevelUp = currentSpriteLevel.addExperience(option.experienceGain)
         saveCurrentSpriteLevel()
-        
+
         if didLevelUp {
-            lastLevelUpValue = currentSpriteLevel.level
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                showLevelUpNotification = true
-            }
+            showLevelUpToast(level: currentSpriteLevel.level)
         }
     }
 
-    private var notifications: [InboxItem] {
-        buildNotifications()
+    private func showLevelUpToast(level: Int) {
+        lastLevelUpValue = level
+        levelUpNotificationSequence += 1
+        let notificationSequence = levelUpNotificationSequence
+
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+            showLevelUpNotification = true
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
+            guard notificationSequence == levelUpNotificationSequence else { return }
+            withAnimation(.easeOut(duration: 0.22)) {
+                showLevelUpNotification = false
+            }
+        }
     }
 
     private var streakTier: Int {
@@ -191,122 +225,90 @@ struct DashboardView: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            let metrics = LayoutMetrics(container: geometry.size, safeArea: geometry.safeAreaInsets)
-            dashboardScene(
-                containerSize: geometry.size,
-                metrics: metrics,
-                showingGame: isShowingGame
-            )
-        }
-        .onAppear {
-            withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
-                healthPulse = true
+        dashboardAlerts
+    }
+
+    private var dashboardLifecycle: some View {
+        dashboardRoot
+            .onAppear(perform: handleAppear)
+            .onReceive(decayTimer) { _ in
+                guard scenePhase == .active else { return }
+                applyElapsedDecay(now: Date())
             }
-            reloadSpriteCatalog()
-            restoreAppState()
-            LocalNotificationManager.shared.requestAuthorization()
-            restorePersistedHealth()
-            restoreSettings()
-            restorePendingCallTracking()
-            refreshStreakDays()
-            syncNotificationSchedules()
-            presentPostCallPromptIfReady()
-            startWalkthroughIfNeeded()
-            loadSpriteLevels()
-        }
-        .onReceive(decayTimer) { _ in
-            guard scenePhase == .active else { return }
-            applyElapsedDecay(now: Date())
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                isKeyboardVisible = true
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                    isKeyboardVisible = true
+                }
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                isKeyboardVisible = false
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                    isKeyboardVisible = false
+                }
             }
-        }
-        .onChange(of: scenePhase) { _, newValue in
-            if newValue == .active {
-                reloadSpriteCatalog()
-                restorePersistedHealth()
-                restoreSettings()
-                restorePendingCallTracking()
-                presentPostCallPromptIfReady()
-            } else if newValue == .background || newValue == .inactive {
+    }
+
+    private var dashboardChangeHandlers: some View {
+        dashboardLifecycle
+            .onChange(of: scenePhase, handleScenePhaseChange)
+            .onChange(of: health) { _, _ in
                 persistHealthState()
-                persistAppState()
-                persistSettings()
-                persistPendingCallTracking()
+                enterHibernationIfNeeded()
                 syncLowHealthNotification()
             }
-        }
-        .onChange(of: health) { _, _ in
-            persistHealthState()
-            syncLowHealthNotification()
-        }
-        .onChange(of: callLogs) { _, _ in
-            AppStatePersistence.saveCallLogs(callLogs)
-        }
-        .onChange(of: selectedSprite) { _, _ in
-            AppStatePersistence.saveSelectedSpriteID(selectedSprite.id)
-            updateCurrentSpriteLevel()
-        }
-        .onChange(of: contacts) { _, _ in
-            sanitizeContactsAfterMutation()
-            persistSettings()
-            syncNotificationSchedules()
-        }
-        .onChange(of: preferredContactID) { _, _ in
-            if selectedLogContactID == nil || !contacts.contains(where: { $0.id == selectedLogContactID }) {
-                selectedLogContactID = preferredContactID
+            .onChange(of: callLogs) { _, _ in
+                AppStatePersistence.saveCallLogs(callLogs)
             }
-            persistSettings()
-            syncNotificationSchedules()
-        }
-        .onChange(of: notificationPreferences) { _, _ in
-            persistSettings()
-            syncNotificationSchedules()
-        }
-        .onChange(of: defaultCallMinutes) { _, _ in
-            defaultCallMinutes = min(max(defaultCallMinutes, 1), 240)
-            if logMinutes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                logMinutes = String(defaultCallMinutes)
+            .onChange(of: currencyBalances) { _, newValue in
+                EconomyPersistence.saveBalances(newValue)
             }
-            persistSettings()
-            syncNotificationSchedules()
-        }
-        .sheet(isPresented: $isContactPickerPresented) {
-            SystemContactPicker { contact in
-                importSystemContact(contact)
+            .onChange(of: contacts) { _, _ in
+                handleContactsChange()
             }
-        }
-        .sheet(isPresented: $isReminderPickerPresented) {
-            ReminderTimePickerSheet(
-                selectedDate: $reminderDraftDate,
-                onSave: applyReminderDraft
-            )
-        }
-        .sheet(isPresented: $isDefaultContactPickerPresented) {
-            DefaultContactPickerSheet(
-                contacts: contacts,
-                selectedContactID: $selectedDefaultContactDraftID,
-                onSave: applyDefaultContactDraft
-            )
-        }
-        .alert(
-            "Log your call?",
-            isPresented: Binding(
-                get: { postCallPrompt != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        clearPendingCallTracking()
-                    }
+            .onChange(of: preferredContactID) { _, _ in
+                handlePreferredContactChange()
+            }
+            .onChange(of: spriteContactAssignments) { _, _ in
+                handleSpriteContactAssignmentsChange()
+            }
+            .onChange(of: notificationPreferences) { _, _ in
+                persistSettings()
+                syncNotificationSchedules()
+            }
+            .onChange(of: defaultCallMinutes) { _, _ in
+                handleDefaultCallMinutesChange()
+            }
+            .onChange(of: activePage) { _, newValue in
+                presentDefaultContactPromptIfNeeded(for: newValue)
+            }
+    }
+
+    private var dashboardSheets: some View {
+        dashboardChangeHandlers
+            .sheet(isPresented: $isContactPickerPresented) {
+                SystemContactPicker { contact in
+                    importSystemContact(contact)
                 }
-            ),
+            }
+            .sheet(isPresented: $isReminderPickerPresented) {
+                ReminderTimePickerSheet(
+                    selectedDate: $reminderDraftDate,
+                    onSave: applyReminderDraft
+                )
+            }
+            .sheet(isPresented: $isDefaultContactPickerPresented) {
+                DefaultContactPickerSheet(
+                    contacts: contacts,
+                    selectedContactID: $selectedDefaultContactDraftID,
+                    onSave: applyDefaultContactDraft
+                )
+            }
+    }
+
+    private var dashboardAlerts: some View {
+        dashboardSheets
+            .alert(
+            "Log your call?",
+            isPresented: postCallPromptBinding,
             presenting: postCallPrompt
         ) { session in
             Button("Save \(estimatedMinutes(for: session)) min") {
@@ -327,18 +329,11 @@ struct DashboardView: View {
                 }
             }
         } message: { session in
-            Text("Add your call with \(session.contactName) so your Tamagotchi gets credit.")
+            Text("Add your call with \(session.contactName) to earn coins for food.")
         }
         .alert(
             "Can't Start Call",
-            isPresented: Binding(
-                get: { callFailureMessage != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        callFailureMessage = nil
-                    }
-                }
-            )
+            isPresented: callFailureBinding
         ) {
             Button("OK", role: .cancel) {
                 ButtonClickSound.perform {
@@ -348,6 +343,126 @@ struct DashboardView: View {
         } message: {
             Text(callFailureMessage ?? "")
         }
+        .alert("Add a default contact", isPresented: $isDefaultContactPromptPresented) {
+            Button("Import Contacts") {
+                ButtonClickSound.perform(importDefaultContactFromPrompt)
+            }
+
+            Button("Add Manually", role: .cancel) {
+                ButtonClickSound.perform {}
+            }
+        } message: {
+            Text("Choose someone to check in with so call logging and reminders can start from a real person.")
+        }
+    }
+
+    private var dashboardRoot: some View {
+        GeometryReader { geometry in
+            dashboardContent(for: geometry)
+        }
+    }
+
+    private func dashboardContent(for geometry: GeometryProxy) -> some View {
+        let metrics = LayoutMetrics(container: geometry.size, safeArea: geometry.safeAreaInsets)
+        return dashboardScene(
+            containerSize: geometry.size,
+            metrics: metrics,
+            showingGame: isShowingGame
+        )
+    }
+
+    private var postCallPromptBinding: Binding<Bool> {
+        Binding(
+            get: { postCallPrompt != nil },
+            set: { isPresented in
+                if !isPresented {
+                    clearPendingCallTracking()
+                }
+            }
+        )
+    }
+
+    private var callFailureBinding: Binding<Bool> {
+        Binding(
+            get: { callFailureMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    callFailureMessage = nil
+                }
+            }
+        )
+    }
+
+    private func handleScenePhaseChange(_ oldValue: ScenePhase, _ newValue: ScenePhase) {
+        if newValue == .active {
+            reloadSpriteCatalog()
+            restorePersistedHealth()
+            restoreSettings()
+            restorePendingCallTracking()
+            presentPostCallPromptIfReady()
+        } else if newValue == .background || newValue == .inactive {
+            persistHealthState()
+            persistAppState()
+            persistSettings()
+            persistPendingCallTracking()
+            syncLowHealthNotification()
+        }
+    }
+
+    private func handleContactsChange() {
+        sanitizeContactsAfterMutation()
+        persistSettings()
+        syncNotificationSchedules()
+    }
+
+    private func handlePreferredContactChange() {
+        if selectedLogContactID == nil || !contacts.contains(where: { $0.id == selectedLogContactID }) {
+            selectedLogContactID = preferredContactID
+        }
+        persistSettings()
+        syncNotificationSchedules()
+    }
+
+    private func handleSpriteContactAssignmentsChange() {
+        sanitizeSpriteContactAssignments()
+        if let currentAssignedContactID {
+            selectedLogContactID = currentAssignedContactID
+        }
+        persistSettings()
+    }
+
+    private func handleDefaultCallMinutesChange() {
+        defaultCallMinutes = min(max(defaultCallMinutes, 1), 240)
+        if logMinutes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            logMinutes = String(defaultCallMinutes)
+        }
+        persistSettings()
+        syncNotificationSchedules()
+    }
+
+    private func importDefaultContactFromPrompt() {
+        DispatchQueue.main.async {
+            isContactPickerPresented = true
+        }
+    }
+
+    private func handleAppear() {
+        withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
+            healthPulse = true
+        }
+        reloadSpriteCatalog()
+        restoreAppState()
+        migrateLegacyCurrencyIfNeeded()
+        loadSpriteLevels()
+        LocalNotificationManager.shared.requestAuthorization()
+        restorePersistedHealth()
+        activateDefaultSpriteHealthIfNeeded()
+        restoreSettings()
+        restorePendingCallTracking()
+        refreshStreakDays()
+        syncNotificationSchedules()
+        presentPostCallPromptIfReady()
+        startWalkthroughIfNeeded()
     }
 
     private func handleKeyboardDismissDrag(_ value: DragGesture.Value) {
@@ -383,6 +498,8 @@ struct DashboardView: View {
             launchingGameOverlay(containerSize: containerSize, metrics: metrics)
 
             walkthroughOverlay(metrics: metrics, showingGame: showingGame)
+
+            levelUpToast(metrics: metrics, showingGame: showingGame)
         }
         .overlay(alignment: .bottom) {
             actionDockOverlay(metrics: metrics, showingGame: showingGame)
@@ -396,6 +513,22 @@ struct DashboardView: View {
     }
 
     @ViewBuilder
+    private func levelUpToast(metrics: LayoutMetrics, showingGame: Bool) -> some View {
+        if showLevelUpNotification && !showingGame {
+            VStack {
+                LevelUpToast(level: lastLevelUpValue)
+                    .padding(.top, metrics.topPadding + metrics.topButtonSize + 12)
+                    .padding(.horizontal, metrics.horizontalPadding)
+
+                Spacer()
+            }
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .zIndex(20)
+            .allowsHitTesting(false)
+        }
+    }
+
+    @ViewBuilder
     private func gameScene(showingGame: Bool) -> some View {
         if showingGame {
             FlappyTamagotchiGameView(
@@ -404,6 +537,7 @@ struct DashboardView: View {
                 sprite: selectedSprite,
                 clothing: selectedClothing,
                 birdVisible: !isLaunchingGame,
+                onEarnCurrency: earnCurrency,
                 onExit: exitGameMode
             )
             .allowsHitTesting(isGameMode)
@@ -419,15 +553,15 @@ struct DashboardView: View {
                 metrics: metrics,
                 isBackVisible: activePage != .home,
                 isQuickActionsExpanded: quickActionsExpanded,
-                hasNotifications: !notifications.isEmpty,
+                currencyBalance: currentCurrencyBalance,
+                currencyTint: selectedSprite.currencyTint,
                 onTitleTap: {
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
                         quickActionsExpanded.toggle()
                     }
                 },
                 onBack: goBack,
-                onWalkthrough: restartWalkthrough,
-                onInbox: { navigate(to: .inbox) }
+                onWalkthrough: restartWalkthrough
             )
             .padding(.top, metrics.topPadding)
             .padding(.horizontal, metrics.horizontalPadding)
@@ -529,11 +663,9 @@ struct DashboardView: View {
                         sprites: availableSprites,
                         selectedSprite: selectedSprite,
                         selectedClothing: selectedClothing,
-                        health: health,
                         selectedDanceSpeed: selectedDanceSpeed,
-                        onSelectSprite: { sprite in
-                            selectedSprite = sprite
-                        }, spriteLevels: spriteLevels
+                        onSelectSprite: selectSprite,
+                        spriteLevels: spriteLevels
                     )
                     .padding(.horizontal, metrics.horizontalPadding)
                     .padding(.bottom, metrics.contentBottomPadding)
@@ -552,7 +684,7 @@ struct DashboardView: View {
                             }
 
                             FloatingHealthBar(
-                                health: health,
+                                health: visibleHealth,
                                 isAnimating: healthPulse,
                                 isTutorialHighlighted: isWalkthroughPresented && WalkthroughStep.allCases[walkthroughIndex].focus == .healthBar
                             )
@@ -565,7 +697,12 @@ struct DashboardView: View {
                                 currentSpriteLevel: currentSpriteLevel,
                                 isGameMode: isShowingGame,
                                 hidesSprite: isLaunchingGame,
-                                onLaunchGame: enterGameMode
+                                isHibernating: isHibernating,
+                                currencyBalance: currentCurrencyBalance,
+                                currencyTint: selectedSprite.currencyTint,
+                                streakTier: streakTier,
+                                onBuyFood: buyFood,
+                                onLogCall: handleDashboardLogCall
                             )
 
                             Spacer(minLength: 0)
@@ -581,7 +718,9 @@ struct DashboardView: View {
 
                     PixelGardenPlaygroundView(
                         sprites: availableSprites,
-                        selectedClothing: selectedClothing
+                        selectedClothing: selectedClothing,
+                        isHibernating: isHibernating,
+                        onLaunchGame: enterGameMode
                     )
                     .padding(.horizontal, metrics.horizontalPadding)
                     .padding(.bottom, metrics.contentBottomPadding)
@@ -596,10 +735,17 @@ struct DashboardView: View {
                     .onChanged { value in
                         guard !isShowingGame else { return }
                         guard abs(value.translation.width) >= abs(value.translation.height) else { return }
+                        if abs(value.translation.width) > 10 {
+                            isHomePanelSwipeInProgress = true
+                        }
                         homeDragTranslation = value.translation.width
                     }
                     .onEnded { value in
                         guard !isShowingGame else { return }
+                        if abs(value.translation.width) > 10 {
+                            lastHomePanelSwipeEndedAt = Date()
+                        }
+                        isHomePanelSwipeInProgress = false
                         guard abs(value.translation.width) >= abs(value.translation.height) else {
                             withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.86, blendDuration: 0.12)) {
                                 homeDragTranslation = 0
@@ -607,7 +753,9 @@ struct DashboardView: View {
                             return
                         }
                         let velocityDelta = value.predictedEndTranslation.width - value.translation.width
-                        let projectedOffset = min(max(baseOffset - value.translation.width - (velocityDelta * 0.2), 0), panelWidth * 2)
+                        let projectedDragOffset = baseOffset - value.translation.width - (velocityDelta * 0.2)
+                        let maximumPanelOffset = panelWidth * 2
+                        let projectedOffset = min(max(projectedDragOffset, 0), maximumPanelOffset)
                         let resolvedPanel = Int((projectedOffset / safePanelWidth).rounded())
                         let clampedPanel = min(max(resolvedPanel, 0), 2)
 
@@ -625,44 +773,184 @@ struct DashboardView: View {
         return contacts.first(where: { $0.id == preferredContactID }) ?? contacts.first
     }
 
-    private func logCall(name: String, minutes: Int) {
-        applyElapsedDecay(now: Date())
+    private var currentAssignedContactID: UUID? {
+        spriteContactAssignments[selectedSprite.id]
+    }
+
+    private var currentAssignedContact: AppContact? {
+        guard let currentAssignedContactID else { return nil }
+        return contacts.first(where: { $0.id == currentAssignedContactID })
+    }
+
+    private var visibleHealth: Double {
+        isHibernating ? 0 : health
+    }
+
+    private var currentCurrencyBalance: Int {
+        max(currencyBalances[selectedSprite.id] ?? 0, 0)
+    }
+
+    private func selectSprite(_ sprite: TamagotchiSpriteProfile) {
+        applySelectedSprite(sprite, activateHealth: true)
+    }
+
+    private func applySelectedSprite(_ sprite: TamagotchiSpriteProfile, activateHealth: Bool) {
+        if selectedSprite.id != sprite.id, hasRestoredCurrentSpriteHealth {
+            persistHealthState()
+        }
+
+        if selectedSprite.id != sprite.id {
+            selectedSprite = sprite
+        }
+
+        AppStatePersistence.saveSelectedSpriteID(sprite.id)
+        updateCurrentSpriteLevel()
+        restorePersistedHealth(for: sprite.id)
+        selectedLogContactID = spriteContactAssignments[sprite.id] ?? preferredContactID ?? contacts.first?.id
+
+        if activateHealth {
+            activateCurrentSpriteHealthIfNeeded()
+        }
+    }
+
+    private func activateCurrentSpriteHealthIfNeeded() {
+        guard !currentSpriteHealthIsActivated else { return }
+        currentSpriteHealthIsActivated = true
+        lastHealthUpdatedAt = Date()
+        persistHealthState()
+    }
+
+    private func activateDefaultSpriteHealthIfNeeded() {
+        let defaultSprite = TamagotchiSpriteCatalog.preferredInitialSprite(from: availableSprites)
+        guard selectedSprite.id == defaultSprite.id else { return }
+        activateCurrentSpriteHealthIfNeeded()
+    }
+
+    private func handleDashboardLogCall() {
+        guard !isSuppressingHomePanelTap else { return }
+        selectedLogContactID = currentAssignedContactID ?? preferredContactID ?? contacts.first?.id
+        navigate(to: .log)
+    }
+
+    private func enterHibernationIfNeeded() {
+        guard currentSpriteHealthIsActivated else { return }
+        guard health <= 0 else { return }
+        guard !isHibernating else { return }
+
+        if isGameMode || isLaunchingGame {
+            exitGameMode()
+        }
+        resetCurrentSpriteLevel()
+        isHibernating = true
+        persistHealthState()
+    }
+
+    private func wakeFromHibernationIfNeeded() {
+        guard isHibernating, health > 0 else { return }
+        isHibernating = false
+        persistHealthState()
+    }
+
+    private var isSuppressingHomePanelTap: Bool {
+        isHomePanelSwipeInProgress ||
+        Date().timeIntervalSince(lastHomePanelSwipeEndedAt) < homePanelSwipeTapSuppressionInterval
+    }
+
+    private func logCall(contactID: UUID?, name: String, minutes: Int) {
         callsLogged += 1
-        callLogs.insert(CallLogEntry(name: name, minutes: minutes, loggedAt: Date()), at: 0)
+        HealthPersistence.saveCallsLogged(callsLogged)
+        callLogs.insert(CallLogEntry(contactID: contactID, name: name, minutes: minutes, loggedAt: Date()), at: 0)
         refreshStreakDays()
 
-        let durationHealing = min(max(Double(minutes) * 1.5, 18), 45)
-        let streakBonus = Double(streakTier * 4)
-        let healingAmount = durationHealing + streakBonus
-        health = min(health + healingAmount, 100)
-        selectedLogContactID = preferredContactID
+        if let contactID, let spriteID = assignedSpriteID(for: contactID) {
+            earnCurrency(callCurrencyReward(for: minutes), for: spriteID)
+        }
+        selectedLogContactID = currentAssignedContactID ?? preferredContactID
         logMinutes = String(defaultCallMinutes)
-        lastHealthUpdatedAt = Date()
         clearPendingCallTracking()
-        awardExperienceForCall(minutes: minutes)
+    }
+
+    private func callCurrencyReward(for minutes: Int) -> Int {
+        min(max(6 + minutes / 2, 8), 40)
+    }
+
+    private func earnCurrency(_ amount: Int) {
+        earnCurrency(amount, for: selectedSprite.id)
+    }
+
+    private func earnCurrency(_ amount: Int, for spriteID: String) {
+        guard amount > 0 else { return }
+        let currentBalance = max(currencyBalances[spriteID] ?? 0, 0)
+        currencyBalances[spriteID] = currentBalance + amount
+    }
+
+    private func buyFood(_ option: FeedingOption) {
+        let cost = option.cost(streakTier: streakTier)
+        guard currentCurrencyBalance >= cost else { return }
+
+        currencyBalances[selectedSprite.id] = currentCurrencyBalance - cost
+        activateCurrentSpriteHealthIfNeeded()
+        applyElapsedDecay(now: Date())
+        health = min(health + option.healthRestored, HealthPersistence.defaultHealth)
+        lastHealthUpdatedAt = Date()
+        wakeFromHibernationIfNeeded()
+        awardExperienceForFeeding(option)
+    }
+
+    private func assignedSpriteID(for contactID: UUID) -> String? {
+        if spriteContactAssignments[selectedSprite.id] == contactID {
+            return selectedSprite.id
+        }
+
+        if let matchingSprite = availableSprites.first(where: { spriteContactAssignments[$0.id] == contactID }) {
+            return matchingSprite.id
+        }
+
+        return spriteContactAssignments
+            .filter { $0.value == contactID }
+            .map(\.key)
+            .sorted()
+            .first
     }
 
     private func applyElapsedDecay(now: Date) {
+        guard currentSpriteHealthIsActivated else { return }
         let updatedHealth = HealthPersistence.decayedHealth(from: health, since: lastHealthUpdatedAt, now: now)
         guard updatedHealth != health || lastHealthUpdatedAt != now else { return }
         health = updatedHealth
         lastHealthUpdatedAt = now
+        enterHibernationIfNeeded()
     }
 
     private func restorePersistedHealth() {
-        let persisted = HealthPersistence.load()
-        callsLogged = persisted.callsLogged
-        health = HealthPersistence.decayedHealth(from: persisted.health, since: persisted.updatedAt, now: Date())
-        lastHealthUpdatedAt = Date()
-        wasBelowLowHealthThreshold = health <= LocalNotificationManager.lowHealthThreshold
+        callsLogged = HealthPersistence.loadCallsLogged()
+        restorePersistedHealth(for: selectedSprite.id)
         refreshStreakDays()
     }
 
+    private func restorePersistedHealth(for spriteID: String) {
+        let now = Date()
+        let persisted = HealthPersistence.loadSpriteState(for: spriteID, now: now)
+        currentSpriteHealthIsActivated = persisted.isActivated
+        isHibernating = persisted.isHibernating
+        health = persisted.isActivated
+            ? HealthPersistence.decayedHealth(from: persisted.health, since: persisted.updatedAt, now: now)
+            : persisted.health
+        lastHealthUpdatedAt = persisted.isActivated ? now : persisted.updatedAt
+        hasRestoredCurrentSpriteHealth = true
+        wasBelowLowHealthThreshold = health <= LocalNotificationManager.lowHealthThreshold
+        enterHibernationIfNeeded()
+    }
+
     private func persistHealthState() {
-        HealthPersistence.save(
-            health: health,
-            updatedAt: lastHealthUpdatedAt,
-            callsLogged: callsLogged
+        HealthPersistence.saveSpriteState(
+            SpriteHealthState(
+                spriteID: selectedSprite.id,
+                health: health,
+                updatedAt: lastHealthUpdatedAt,
+                isActivated: currentSpriteHealthIsActivated,
+                isHibernating: isHibernating
+            )
         )
     }
 
@@ -693,6 +981,8 @@ struct DashboardView: View {
                     LogPageCard(
                         contacts: contacts,
                         selectedContactID: $selectedLogContactID,
+                        assignedContact: currentAssignedContact,
+                        selectedSpriteName: selectedSprite.displayName,
                         minutes: $logMinutes,
                         defaultCallMinutes: defaultCallMinutes,
                         entries: callLogs,
@@ -706,6 +996,8 @@ struct DashboardView: View {
                     SettingsPageCard(
                         contacts: contacts,
                         preferredContactID: $preferredContactID,
+                        spriteContactAssignments: $spriteContactAssignments,
+                        sprites: availableSprites,
                         pendingContactName: $pendingContactName,
                         notificationPreferences: $notificationPreferences,
                         reminderTime: reminderDateBinding,
@@ -717,7 +1009,6 @@ struct DashboardView: View {
                 } else {
                     DetailPageCard(
                         page: page,
-                        items: notifications,
                         selectedClothing: $selectedClothing,
                         selectedDanceSpeed: $selectedDanceSpeed,
                         streakTier: streakTier,
@@ -744,11 +1035,13 @@ struct DashboardView: View {
             return
         }
 
-        logCall(name: contact.name, minutes: minutes)
+        logCall(contactID: contact.id, name: contact.name, minutes: minutes)
     }
 
     private func selectRecentLogEntry(_ entry: CallLogEntry) {
-        if let matchingContact = contacts.first(where: { contact in
+        if let contactID = entry.contactID, contacts.contains(where: { $0.id == contactID }) {
+            selectedLogContactID = contactID
+        } else if let matchingContact = contacts.first(where: { contact in
             contact.name.compare(entry.name, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
         }) {
             selectedLogContactID = matchingContact.id
@@ -764,17 +1057,28 @@ struct DashboardView: View {
 
         if let selectedSpriteID = AppStatePersistence.loadSelectedSpriteID(),
            let persistedSprite = loadedSprites.first(where: { $0.id == selectedSpriteID }) {
-            selectedSprite = persistedSprite
+            applySelectedSprite(persistedSprite, activateHealth: false)
         } else if let existing = loadedSprites.first(where: { $0.id == selectedSprite.id }) {
-            selectedSprite = existing
+            applySelectedSprite(existing, activateHealth: false)
         } else {
-            selectedSprite = TamagotchiSpriteCatalog.preferredInitialSprite(from: loadedSprites)
+            applySelectedSprite(TamagotchiSpriteCatalog.preferredInitialSprite(from: loadedSprites), activateHealth: false)
         }
     }
 
     private func restoreAppState() {
         callLogs = AppStatePersistence.loadCallLogs()
         restoreSelectedSprite()
+    }
+
+    private func migrateLegacyCurrencyIfNeeded() {
+        let migratedBalances = EconomyPersistence.migratedBalancesIfNeeded(
+            existingBalances: currencyBalances,
+            defaultSpriteID: selectedSprite.id
+        )
+
+        if migratedBalances != currencyBalances {
+            currencyBalances = migratedBalances
+        }
     }
 
     private func persistAppState() {
@@ -785,7 +1089,7 @@ struct DashboardView: View {
     private func restoreSelectedSprite() {
         guard let selectedSpriteID = AppStatePersistence.loadSelectedSpriteID() else { return }
         guard let persistedSprite = availableSprites.first(where: { $0.id == selectedSpriteID }) else { return }
-        selectedSprite = persistedSprite
+        applySelectedSprite(persistedSprite, activateHealth: false)
     }
 
     private func refreshStreakDays() {
@@ -796,13 +1100,24 @@ struct DashboardView: View {
         let settings = SettingsPersistence.load()
         contacts = settings.contacts
         preferredContactID = settings.preferredContactID
+        spriteContactAssignments = settings.spriteContactAssignments
         defaultCallMinutes = settings.defaultCallMinutes
         notificationPreferences = settings.notificationPreferences
-        selectedLogContactID = settings.preferredContactID ?? settings.contacts.first?.id
+        selectedLogContactID = spriteContactAssignments[selectedSprite.id] ?? settings.preferredContactID ?? settings.contacts.first?.id
 
         if logMinutes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             logMinutes = String(settings.defaultCallMinutes)
         }
+    }
+
+    private func presentDefaultContactPromptIfNeeded(for page: HomePage) {
+        guard page == .settings else { return }
+        guard contacts.isEmpty, preferredContactID == nil else { return }
+        guard !SettingsPersistence.hasPromptedForDefaultContact else { return }
+        guard !isDefaultContactPromptPresented else { return }
+
+        SettingsPersistence.markPromptedForDefaultContact()
+        isDefaultContactPromptPresented = true
     }
 
     private func persistSettings() {
@@ -810,6 +1125,7 @@ struct DashboardView: View {
             AppSettings(
                 contacts: contacts,
                 preferredContactID: preferredContactID,
+                spriteContactAssignments: spriteContactAssignments,
                 defaultCallMinutes: defaultCallMinutes,
                 notificationPreferences: notificationPreferences
             )
@@ -966,7 +1282,7 @@ struct DashboardView: View {
     }
 
     private func savePendingCall(_ session: PendingCallSession) {
-        logCall(name: session.contactName, minutes: estimatedMinutes(for: session))
+        logCall(contactID: session.contactID, name: session.contactName, minutes: estimatedMinutes(for: session))
     }
 
     private func reviewPendingCall(_ session: PendingCallSession) {
@@ -1026,6 +1342,16 @@ struct DashboardView: View {
         if !contacts.contains(where: { $0.id == selectedLogContactID }) {
             selectedLogContactID = preferredContactID ?? contacts.first?.id
         }
+
+        sanitizeSpriteContactAssignments()
+    }
+
+    private func sanitizeSpriteContactAssignments() {
+        let contactIDs = Set(contacts.map(\.id))
+        let sanitizedAssignments = spriteContactAssignments.filter { contactIDs.contains($0.value) }
+        if sanitizedAssignments != spriteContactAssignments {
+            spriteContactAssignments = sanitizedAssignments
+        }
     }
 
     private func syncNotificationSchedules() {
@@ -1041,63 +1367,6 @@ struct DashboardView: View {
         }
 
         syncLowHealthNotification()
-    }
-
-    private func buildNotifications() -> [InboxItem] {
-        var items: [InboxItem] = []
-        let focusName = preferredContact?.name ?? contacts.first?.name ?? "your favorite person"
-
-        if notificationPreferences.dailyRemindersEnabled {
-            items.append(
-                InboxItem(
-                    title: "Daily reminder set for \(formattedReminderHour)",
-                    subtitle: "Check in with \(focusName) for about \(defaultCallMinutes) minute\(defaultCallMinutes == 1 ? "" : "s").",
-                    kind: .reminder
-                )
-            )
-        }
-
-        if notificationPreferences.streakAlertsEnabled {
-            let streakTitle = streakDays > 0 ? "\(streakDays)-day streak active" : "Start a new streak today"
-            let streakSubtitle = streakDays > 0
-                ? "One more call keeps your streak with \(focusName) moving."
-                : "Log one call today to get momentum going."
-
-            items.append(InboxItem(title: streakTitle, subtitle: streakSubtitle, kind: .streak))
-        }
-
-        if notificationPreferences.messageAlertsEnabled, !contacts.isEmpty {
-            items.append(
-                InboxItem(
-                    title: "\(focusName) replied",
-                    subtitle: "Call me when you get a minute.",
-                    kind: .message
-                )
-            )
-        }
-
-        if notificationPreferences.weeklySummaryEnabled {
-            let weeklyStats = weeklySummary()
-            items.append(
-                InboxItem(
-                    title: "Weekly recap: \(weeklyStats.callCount) call\(weeklyStats.callCount == 1 ? "" : "s"), \(weeklyStats.totalMinutes) minutes",
-                    subtitle: weeklyStats.subtitle,
-                    kind: .summary
-                )
-            )
-        }
-
-        if notificationPreferences.lowHealthAlertsEnabled, health <= LocalNotificationManager.lowHealthThreshold {
-            items.append(
-                InboxItem(
-                    title: "Health is getting low",
-                    subtitle: "Log a call soon to recharge your Tamagotchi.",
-                    kind: .health
-                )
-            )
-        }
-
-        return items
     }
 
     private func weeklySummary(calendar: Calendar = .current) -> (callCount: Int, totalMinutes: Int, subtitle: String) {
@@ -1173,6 +1442,7 @@ struct DashboardView: View {
 
         pageHistory.removeAll()
         quickActionsExpanded = false
+        isHomePanelSwipeInProgress = false
         homeDragTranslation = 0
 
         withAnimation(.interactiveSpring(response: 0.30, dampingFraction: 0.86, blendDuration: 0.12)) {
@@ -1253,21 +1523,17 @@ struct DashboardView: View {
 
     private func enterGameMode() {
         guard activePage == .home, !isGameMode, !isLaunchingGame else { return }
+        guard !isHibernating else {
+            callFailureMessage = "Your Tamagotchi is hibernating. Feed it from the shop to wake it up before playing."
+            return
+        }
         quickActionsExpanded = false
         gameEntryProgress = 0
 
-        withAnimation(.spring(response: 0.52, dampingFraction: 0.88)) {
-            isLaunchingGame = true
-        }
-
-        withAnimation(.spring(response: 0.58, dampingFraction: 0.86)) {
-            gameEntryProgress = 1
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.48) {
-            guard isLaunchingGame else { return }
+        withAnimation(.spring(response: 0.46, dampingFraction: 0.90)) {
             isGameMode = true
             isLaunchingGame = false
+            gameEntryProgress = 1
         }
     }
 
@@ -1376,6 +1642,45 @@ private enum WalkthroughPersistence {
     }
 }
 
+private enum SpriteIDMigration {
+    private static let legacyToCanonical = [
+        "t1": "slime",
+        "t2": "cecil"
+    ]
+
+    static func canonical(_ id: String) -> String {
+        legacyToCanonical[id] ?? id
+    }
+
+    static func migratedValues<Value>(_ values: [String: Value]) -> [String: Value] {
+        var migrated = values
+        for (legacyID, canonicalID) in legacyToCanonical {
+            if let legacyValue = values[legacyID], values[canonicalID] == nil {
+                migrated[canonicalID] = legacyValue
+            }
+            migrated.removeValue(forKey: legacyID)
+        }
+        return migrated
+    }
+
+    static func migratedLevels(_ levels: [String: SpriteLevel]) -> [String: SpriteLevel] {
+        var migrated: [String: SpriteLevel] = [:]
+        for (id, level) in levels {
+            let canonicalID = canonical(id)
+            let normalizedLevel = SpriteLevel(
+                spriteID: canonicalID,
+                level: level.level,
+                experienceInLevel: level.experienceInLevel
+            )
+
+            if migrated[canonicalID] == nil || canonicalID == id {
+                migrated[canonicalID] = normalizedLevel
+            }
+        }
+        return migrated
+    }
+}
+
 private enum AppStatePersistence {
     private static let callLogsKey = "appState.callLogs"
     private static let selectedSpriteIDKey = "appState.selectedSpriteID"
@@ -1397,12 +1702,53 @@ private enum AppStatePersistence {
     }
 
     static func loadSelectedSpriteID() -> String? {
-        UserDefaults.standard.string(forKey: selectedSpriteIDKey)
+        guard let spriteID = UserDefaults.standard.string(forKey: selectedSpriteIDKey) else { return nil }
+        let canonicalSpriteID = SpriteIDMigration.canonical(spriteID)
+        if canonicalSpriteID != spriteID {
+            saveSelectedSpriteID(canonicalSpriteID)
+        }
+        return canonicalSpriteID
     }
 
     static func saveSelectedSpriteID(_ id: String) {
-        UserDefaults.standard.set(id, forKey: selectedSpriteIDKey)
+        UserDefaults.standard.set(SpriteIDMigration.canonical(id), forKey: selectedSpriteIDKey)
         UserDefaults.standard.synchronize()
+    }
+}
+
+private enum EconomyPersistence {
+    private static let legacyBalanceKey = "economy.currencyBalance"
+    private static let balancesKey = "economy.currencyBalancesBySprite"
+
+    static func loadBalances() -> [String: Int] {
+        guard
+            let data = UserDefaults.standard.data(forKey: balancesKey),
+            let balances = try? JSONDecoder().decode([String: Int].self, from: data)
+        else {
+            return [:]
+        }
+
+        let sanitizedBalances = balances.mapValues { max($0, 0) }
+        let migratedBalances = SpriteIDMigration.migratedValues(sanitizedBalances)
+        if migratedBalances != sanitizedBalances {
+            saveBalances(migratedBalances)
+        }
+        return migratedBalances
+    }
+
+    static func saveBalances(_ balances: [String: Int]) {
+        let sanitizedBalances = SpriteIDMigration.migratedValues(balances).mapValues { max($0, 0) }
+        guard let encoded = try? JSONEncoder().encode(sanitizedBalances) else { return }
+        UserDefaults.standard.set(encoded, forKey: balancesKey)
+    }
+
+    static func migratedBalancesIfNeeded(existingBalances: [String: Int], defaultSpriteID: String) -> [String: Int] {
+        guard existingBalances.isEmpty else { return existingBalances }
+        let legacyBalance = max(UserDefaults.standard.object(forKey: legacyBalanceKey) as? Int ?? 0, 0)
+        guard legacyBalance > 0 else { return existingBalances }
+
+        UserDefaults.standard.removeObject(forKey: legacyBalanceKey)
+        return [SpriteIDMigration.canonical(defaultSpriteID): legacyBalance]
     }
 }
 
@@ -1466,13 +1812,13 @@ private enum WalkthroughStep: CaseIterable, Identifiable {
     var message: String {
         switch self {
         case .welcome:
-            return "Your Tamagotchi stays healthy when you make time for real calls."
+            return "Each Tamagotchi can be linked to a specific contact. Calls with that person keep their paired Tamagotchi healthy."
         case .health:
-            return "The health bar changes color as it drops. Logging a call heals your companion."
+            return "This health bar belongs to the selected Tamagotchi. Calls earn coins, and food from the shop restores health and gives level progress."
         case .logCall:
-            return "Use the Log tab to save a call, reuse recent entries, or call an imported contact."
+            return "Use the Log tab to save calls and earn coins. Spend coins on food to heal and level up your Tamagotchi."
         case .contacts:
-            return "Settings lets you import iPhone contacts, choose a default person, and tune reminders."
+            return "Settings lets you import contacts, choose defaults, and assign each Tamagotchi to the person it should represent."
         case .upgrades:
             return "Upgrades change style and show your streak tier. Streaks rise only when calls are logged on consecutive days."
         case .garden:
@@ -1796,11 +2142,11 @@ private struct HomeTopBar: View {
     let metrics: LayoutMetrics
     let isBackVisible: Bool
     let isQuickActionsExpanded: Bool
-    let hasNotifications: Bool
+    let currencyBalance: Int
+    let currencyTint: Color
     let onTitleTap: () -> Void
     let onBack: () -> Void
     let onWalkthrough: () -> Void
-    let onInbox: () -> Void
 
     var body: some View {
         HStack {
@@ -1826,8 +2172,82 @@ private struct HomeTopBar: View {
 
             Spacer()
 
-            CircularIconButton(systemName: "bell.badge.fill", diameter: metrics.topButtonSize, iconSize: metrics.topIconSize, showDot: hasNotifications, action: onInbox)
+            TopCurrencyIndicator(balance: currencyBalance, tint: currencyTint)
+                .frame(minWidth: metrics.topButtonSize, minHeight: metrics.topButtonSize)
         }
+    }
+}
+
+private struct TopCurrencyIndicator: View {
+    let balance: Int
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "circle.hexagongrid.fill")
+                .font(.system(size: 14, weight: .black))
+                .foregroundStyle(tint)
+
+            Text("\(balance)")
+                .font(.system(size: 14, weight: .black, design: .rounded))
+                .foregroundStyle(tint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(
+            Capsule(style: .continuous)
+                .fill(tint.opacity(0.14))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(tint.opacity(0.46), lineWidth: 1)
+                )
+        )
+        .shadow(color: Color.black.opacity(0.08), radius: 10, y: 5)
+        .accessibilityLabel("\(balance) coins")
+    }
+}
+
+private struct LevelUpToast: View {
+    let level: Int
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 18, weight: .black))
+                .foregroundStyle(Color(red: 1.00, green: 0.80, blue: 0.26))
+                .frame(width: 34, height: 34)
+                .background(
+                    Circle()
+                        .fill(Color(red: 0.13, green: 0.20, blue: 0.34))
+                )
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Level Up!")
+                    .font(.system(size: 16, weight: .black, design: .rounded))
+                    .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+
+                Text("Your Tamagotchi reached LV \(level).")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color(red: 0.28, green: 0.36, blue: 0.48))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.white.opacity(0.96))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(0.85), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.18), radius: 18, x: 0, y: 10)
+        )
     }
 }
 
@@ -1869,6 +2289,11 @@ private struct FloatingHealthBar: View {
         healthGradient.last ?? Color.red
     }
 
+    private func fillWidth(in totalWidth: CGFloat) -> CGFloat {
+        guard clampedHealth > 0 else { return 0 }
+        return max(28, totalWidth * (clampedHealth / 100))
+    }
+
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
@@ -1884,7 +2309,7 @@ private struct FloatingHealthBar: View {
                         )
                     )
                     .frame(
-                        width: max(28, geometry.size.width * (clampedHealth / 100)),
+                        width: fillWidth(in: geometry.size.width),
                         height: 14
                     )
                     .overlay {
@@ -1895,7 +2320,10 @@ private struct FloatingHealthBar: View {
                         }
                     }
                     .scaleEffect(x: 1, y: isAnimating ? 1.03 : 0.97, anchor: .center)
-                    .shadow(color: glowColor.opacity(0.24), radius: isAnimating ? 8 : 4)
+                    .shadow(
+                        color: isTutorialHighlighted ? glowColor.opacity(0.24) : .clear,
+                        radius: isTutorialHighlighted ? (isAnimating ? 8 : 4) : 0
+                    )
                     .animation(.easeInOut(duration: 0.8), value: isAnimating)
                     .animation(.easeInOut(duration: 0.45), value: health)
             }
@@ -2111,7 +2539,12 @@ private struct IntegratedTamagotchiStage: View {
     let currentSpriteLevel: SpriteLevel
     let isGameMode: Bool
     let hidesSprite: Bool
-    let onLaunchGame: () -> Void
+    let isHibernating: Bool
+    let currencyBalance: Int
+    let currencyTint: Color
+    let streakTier: Int
+    let onBuyFood: (FeedingOption) -> Void
+    let onLogCall: () -> Void
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -2122,7 +2555,9 @@ private struct IntegratedTamagotchiStage: View {
                     clothing: clothing,
                     danceSpeed: danceSpeed,
                     level: currentSpriteLevel,
-                    showLevel: true
+                    showLevel: true,
+                    labelOffsetY: -10,
+                    isSleeping: isHibernating
                 )
                 .offset(y: 50)
             }
@@ -2134,39 +2569,122 @@ private struct IntegratedTamagotchiStage: View {
                 .offset(y: 20)
 
             if !isGameMode {
+                HStack {
+                    Spacer(minLength: 0)
+
+                    FoodFeedRail(
+                        currencyBalance: currencyBalance,
+                        currencyTint: currencyTint,
+                        streakTier: streakTier,
+                        onBuyFood: onBuyFood
+                    )
+                    .padding(.trailing, 2)
+                }
+                .offset(y: 18)
+
                 VStack {
                     Spacer()
 
-                    Button(action: ButtonClickSound.action(onLaunchGame)) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 13, weight: .black))
-                            Text("Play")
-                                .font(.system(size: 14, weight: .black, design: .rounded))
+                    Button(action: ButtonClickSound.action(onLogCall)) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "phone.badge.plus.fill")
+                                .font(.system(size: 16, weight: .black))
+                            Text("Log Call")
+                                .font(.system(size: 17, weight: .black, design: .rounded))
                         }
                         .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 11)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 14)
                         .background(
                             Capsule(style: .continuous)
-                                .fill(Color.white.opacity(0.84))
+                                .fill(Color.white.opacity(0.90))
                         )
+                        .shadow(color: Color.black.opacity(0.12), radius: 12, y: 7)
                     }
                     .buttonStyle(.plain)
                 }
-                .offset(y: 54)
+                .offset(y: 104)
+
+                if isHibernating {
+                    VStack {
+                        Spacer()
+
+                        Text("Hibernating until you feed it")
+                            .font(.system(size: 12, weight: .black, design: .rounded))
+                            .foregroundStyle(Color(red: 0.43, green: 0.38, blue: 0.58))
+                    }
+                    .offset(y: 154)
+                    .allowsHitTesting(false)
+                }
             }
         }
-        .frame(height: 300)
+        .frame(height: 356)
     }
 
+}
+
+private struct FoodFeedRail: View {
+    let currencyBalance: Int
+    let currencyTint: Color
+    let streakTier: Int
+    let onBuyFood: (FeedingOption) -> Void
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ForEach(FeedingOption.allCases) { option in
+                let cost = option.cost(streakTier: streakTier)
+                Button(action: ButtonClickSound.action { onBuyFood(option) }) {
+                    HStack(spacing: 7) {
+                        Image(systemName: option.symbol)
+                            .font(.system(size: 13, weight: .black))
+                            .foregroundStyle(option.tint)
+                            .frame(width: 24, height: 24)
+                            .background(
+                                Circle()
+                                    .fill(option.tint.opacity(0.16))
+                            )
+
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(option.displayName)
+                                .font(.system(size: 11, weight: .black, design: .rounded))
+                                .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+
+                            HStack(spacing: 3) {
+                                Image(systemName: "circle.hexagongrid.fill")
+                                    .font(.system(size: 7, weight: .black))
+                                    .foregroundStyle(currencyTint)
+                                Text("\(cost)")
+                                    .font(.system(size: 10, weight: .black, design: .rounded))
+                                    .foregroundStyle(currencyTint)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 7)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.white.opacity(0.88))
+                            .overlay(
+                                Capsule(style: .continuous)
+                                    .stroke(currencyTint.opacity(0.22), lineWidth: 1)
+                            )
+                    )
+                    .shadow(color: Color.black.opacity(0.08), radius: 8, y: 5)
+                }
+                .buttonStyle(.plain)
+                .disabled(currencyBalance < cost)
+                .opacity(currencyBalance < cost ? 0.48 : 1)
+                .accessibilityLabel("\(option.displayName), \(cost) coins")
+            }
+        }
+        .frame(width: 104, alignment: .trailing)
+    }
 }
 
 private struct SpriteSelectionGridView: View {
     let sprites: [TamagotchiSpriteProfile]
     let selectedSprite: TamagotchiSpriteProfile
     let selectedClothing: ClothingOption
-    let health: Double
     let selectedDanceSpeed: DanceSpeed
     let onSelectSprite: (TamagotchiSpriteProfile) -> Void
     let spriteLevels: [String: SpriteLevel]
@@ -2175,7 +2693,7 @@ private struct SpriteSelectionGridView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Choose Sprite")
+            Text("Choose Tamagotchi")
                 .font(.system(size: 22, weight: .black, design: .rounded))
                 .foregroundStyle(Color(red: 0.09, green: 0.16, blue: 0.26))
 
@@ -2185,7 +2703,7 @@ private struct SpriteSelectionGridView: View {
                         Button(action: ButtonClickSound.action { onSelectSprite(sprite) }) {
                             VStack(spacing: 8) {
                                 PixelTamagotchi(
-                                    health: health,
+                                    health: HealthPersistence.defaultHealth,
                                     sprite: sprite,
                                     clothing: selectedClothing,
                                     artSize: 96,
@@ -2225,6 +2743,8 @@ private struct SpriteSelectionGridView: View {
 private struct PixelGardenPlaygroundView: View {
     let sprites: [TamagotchiSpriteProfile]
     let selectedClothing: ClothingOption
+    let isHibernating: Bool
+    let onLaunchGame: () -> Void
 
     @State private var pets: [GardenPet] = []
     @State private var lastTick = Date()
@@ -2241,13 +2761,34 @@ private struct PixelGardenPlaygroundView: View {
                 RoundedRectangle(cornerRadius: 26, style: .continuous)
                     .fill(Color.white.opacity(0.42))
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Pixel Garden")
-                        .font(.system(size: 24, weight: .black, design: .rounded))
-                        .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
-                    Text("Swipe back to home. Plants coming soon.")
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                        .foregroundStyle(Color(red: 0.31, green: 0.45, blue: 0.50))
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Pixel Garden")
+                            .font(.system(size: 24, weight: .black, design: .rounded))
+                            .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
+                        Text("Swipe back to home. Plants coming soon.")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundStyle(Color(red: 0.31, green: 0.45, blue: 0.50))
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Button(action: ButtonClickSound.action(onLaunchGame)) {
+                        HStack(spacing: 7) {
+                            Image(systemName: isHibernating ? "moon.zzz.fill" : "play.fill")
+                                .font(.system(size: 12, weight: .black))
+                            Text(isHibernating ? "Asleep" : "Play")
+                                .font(.system(size: 13, weight: .black, design: .rounded))
+                        }
+                        .foregroundStyle(isHibernating ? Color(red: 0.43, green: 0.38, blue: 0.58) : Color(red: 0.08, green: 0.15, blue: 0.24))
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 10)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.white.opacity(0.84))
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 16)
@@ -2377,25 +2918,45 @@ private struct PixelTamagotchi: View {
     var level: SpriteLevel? = nil
     var showLevel: Bool = false
     var showsLevelProgress: Bool = true
+    var labelOffsetY: CGFloat = 0
+    var isSleeping: Bool = false
 
     var body: some View {
         VStack(spacing: showsLabels ? 10 : 0) {
         
             ZStack(alignment: .topTrailing) {
-                if let atlas = sprite.atlas {
-                    TimelineView(.animation(minimumInterval: frameInterval(for: atlas), paused: false)) { context in
-                        if let atlasSpriteImage = atlasSpriteImage(at: context.date, atlas: atlas) {
-                            atlasSpriteImage
-                                .resizable()
-                                .interpolation(.none)
-                                .frame(width: artSize, height: artSize)
-                        } else {
-                            fallbackPixelSprite
+                ZStack(alignment: .topLeading) {
+                    if let atlas = sprite.atlas {
+                        TimelineView(.animation(minimumInterval: frameInterval(for: atlas), paused: isSleeping)) { context in
+                            if let atlasSpriteImage = atlasSpriteImage(at: context.date, atlas: atlas) {
+                                atlasSpriteImage
+                                    .resizable()
+                                    .interpolation(.none)
+                                    .frame(width: artSize, height: artSize)
+                            } else {
+                                fallbackPixelSprite
+                            }
                         }
+                    } else {
+                        fallbackPixelSprite
                     }
-                } else {
-                    fallbackPixelSprite
+
+                    if isSleeping {
+                        Text("Zzz")
+                            .font(.system(size: max(16, artSize * 0.12), weight: .black, design: .rounded))
+                            .foregroundStyle(Color(red: 0.43, green: 0.38, blue: 0.58))
+                            .padding(.horizontal, max(8, artSize * 0.05))
+                            .padding(.vertical, max(4, artSize * 0.03))
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(Color.white.opacity(0.82))
+                            )
+                            .offset(x: artSize * 0.08, y: artSize * 0.02)
+                    }
                 }
+                .opacity(isSleeping ? 0.58 : 1)
+                .saturation(isSleeping ? 0.30 : 1)
+                .rotationEffect(.degrees(isSleeping ? -8 : 0))
 
                 if showLevel, let level = level {
                     PixelLevelBadge(
@@ -2412,6 +2973,7 @@ private struct PixelTamagotchi: View {
                 Text(sprite.displayName)
                     .font(.system(size: 12, weight: .bold, design: .rounded))
                     .foregroundStyle(Color.white.opacity(0.86))
+                    .offset(y: labelOffsetY)
             }
         }
     }
@@ -2442,8 +3004,8 @@ private struct PixelTamagotchi: View {
 
     private func frameInterval(for atlas: TamagotchiAtlas) -> TimeInterval {
         let baseInterval = atlas.idleAnimation.frameInterval
-        // Apply dance speed multiplier inversely (faster speed = shorter interval)
-        return baseInterval / danceSpeed.animationSpeedMultiplier
+        // User-selected speed is the baseline; low health slows the animation down.
+        return baseInterval / effectiveAnimationSpeedMultiplier
     }
 
     private func atlasSpriteImage(at date: Date, atlas: TamagotchiAtlas) -> Image? {
@@ -2460,8 +3022,27 @@ private struct PixelTamagotchi: View {
     }
 
     private func atlasFrameIndex(at date: Date, atlas: TamagotchiAtlas) -> Int {
-        let adjustedInterval = atlas.idleAnimation.frameInterval / danceSpeed.animationSpeedMultiplier
+        let adjustedInterval = atlas.idleAnimation.frameInterval / effectiveAnimationSpeedMultiplier
         return Int(date.timeIntervalSinceReferenceDate / adjustedInterval)
+    }
+
+    private var effectiveAnimationSpeedMultiplier: Double {
+        danceSpeed.animationSpeedMultiplier * healthAnimationMultiplier
+    }
+
+    private var healthAnimationMultiplier: Double {
+        switch health {
+        case 70...:
+            return 1.0
+        case 40..<70:
+            return 0.78
+        case 20..<40:
+            return 0.52
+        case 1..<20:
+            return 0.32
+        default:
+            return 0.20
+        }
     }
 
     private var pixelRows: [String] {
@@ -2577,12 +3158,14 @@ private struct FlappyTamagotchiGameView: View {
     let sprite: TamagotchiSpriteProfile
     let clothing: ClothingOption
     let birdVisible: Bool
+    let onEarnCurrency: (Int) -> Void
     let onExit: () -> Void
 
     @State private var birdY: CGFloat = 0
     @State private var birdVelocity: CGFloat = 0
     @State private var pipes: [FlappyPipe] = []
     @State private var score = 0
+    @State private var highScore = 0
     @State private var hasStarted = false
     @State private var isGameOver = false
     @State private var lastTick = Date()
@@ -2594,6 +3177,7 @@ private struct FlappyTamagotchiGameView: View {
             let containerSize = geometry.size
             let sceneFrame = FlappyGameLayout.sceneFrame(in: containerSize)
             let sceneSize = sceneFrame.size
+            let displayedBirdY = birdY == 0 ? FlappyGameLayout.birdSpawnY(for: sceneSize) : birdY
 
             ZStack(alignment: .top) {
                 ForEach(pipes) { pipe in
@@ -2612,14 +3196,14 @@ private struct FlappyTamagotchiGameView: View {
                     .rotationEffect(.degrees(Double(max(-26, min(28, birdVelocity * 0.05)))))
                     .position(
                         x: FlappyGameLayout.birdX(for: sceneSize),
-                        y: birdY
+                        y: displayedBirdY
                     )
                     .shadow(color: Color.black.opacity(0.12), radius: 10, y: 8)
                 }
 
                 VStack(spacing: 18) {
                     HStack(alignment: .center) {
-                        ScorePill(score: score)
+                        ScorePill(score: score, highScore: highScore)
                         Spacer()
                         Button(action: ButtonClickSound.action(onExit)) {
                             Image(systemName: "xmark")
@@ -2642,7 +3226,7 @@ private struct FlappyTamagotchiGameView: View {
                     } else if isGameOver {
                         GamePromptCard(
                             title: "Try Again",
-                            subtitle: "Tap to restart the run."
+                            subtitle: "Best for \(sprite.displayName): \(highScore)"
                         )
                     }
 
@@ -2660,6 +3244,11 @@ private struct FlappyTamagotchiGameView: View {
                 handleTap(in: sceneSize)
             }
             .onAppear {
+                loadHighScore()
+                resetGame(in: sceneSize)
+            }
+            .onChange(of: sprite.id) { _, _ in
+                loadHighScore()
                 resetGame(in: sceneSize)
             }
             .onReceive(gameTimer) { now in
@@ -2683,11 +3272,6 @@ private struct FlappyTamagotchiGameView: View {
     }
 
     private func update(now: Date, in size: CGSize) {
-        if birdY == 0 {
-            birdY = FlappyGameLayout.birdSpawnY(for: size)
-            lastTick = now
-        }
-
         guard hasStarted, !isGameOver else {
             lastTick = now
             return
@@ -2709,6 +3293,10 @@ private struct FlappyTamagotchiGameView: View {
             if !pipes[index].didScore, pipes[index].x + pipeWidth / 2 < birdX {
                 pipes[index].didScore = true
                 score += 1
+                if score % 10 == 0 {
+                    onEarnCurrency(1)
+                }
+                saveHighScoreIfNeeded()
             }
         }
 
@@ -2779,6 +3367,16 @@ private struct FlappyTamagotchiGameView: View {
     private func randomPipeSpacing(base: CGFloat) -> CGFloat {
         base + CGFloat.random(in: 18...92)
     }
+
+    private func loadHighScore() {
+        highScore = FlappyHighScorePersistence.highScore(for: sprite.id)
+    }
+
+    private func saveHighScoreIfNeeded() {
+        guard score > highScore else { return }
+        highScore = score
+        FlappyHighScorePersistence.save(score: score, for: sprite.id)
+    }
 }
 
 private struct LaunchingGameSpriteOverlay: View {
@@ -2845,6 +3443,40 @@ private enum FlappyGameLayout {
     }
 }
 
+private enum FlappyHighScorePersistence {
+    private static let storageKey = "flappy.highScoresBySprite"
+
+    static func highScore(for spriteID: String) -> Int {
+        max(loadScores()[SpriteIDMigration.canonical(spriteID)] ?? 0, 0)
+    }
+
+    static func save(score: Int, for spriteID: String) {
+        var scores = loadScores()
+        let canonicalSpriteID = SpriteIDMigration.canonical(spriteID)
+        scores[canonicalSpriteID] = max(score, highScore(for: canonicalSpriteID))
+
+        guard let encoded = try? JSONEncoder().encode(scores) else { return }
+        UserDefaults.standard.set(encoded, forKey: storageKey)
+    }
+
+    private static func loadScores() -> [String: Int] {
+        guard
+            let data = UserDefaults.standard.data(forKey: storageKey),
+            let scores = try? JSONDecoder().decode([String: Int].self, from: data)
+        else {
+            return [:]
+        }
+
+        let sanitizedScores = scores.mapValues { max($0, 0) }
+        let migratedScores = SpriteIDMigration.migratedValues(sanitizedScores)
+        if migratedScores != sanitizedScores {
+            guard let encoded = try? JSONEncoder().encode(migratedScores) else { return migratedScores }
+            UserDefaults.standard.set(encoded, forKey: storageKey)
+        }
+        return migratedScores
+    }
+}
+
 private struct GamePromptCard: View {
     let title: String
     let subtitle: String
@@ -2870,13 +3502,21 @@ private struct GamePromptCard: View {
 
 private struct ScorePill: View {
     let score: Int
+    let highScore: Int
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Image(systemName: "gamecontroller.fill")
                 .font(.system(size: 13, weight: .black))
-            Text("\(score)")
-                .font(.system(size: 16, weight: .black, design: .rounded))
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(score)")
+                    .font(.system(size: 16, weight: .black, design: .rounded))
+
+                Text("Best \(highScore)")
+                    .font(.system(size: 10, weight: .black, design: .rounded))
+                    .foregroundStyle(Color(red: 0.33, green: 0.43, blue: 0.51))
+            }
         }
         .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
         .padding(.horizontal, 14)
@@ -2955,7 +3595,6 @@ private enum DetailCardPalette {
 
 private struct DetailPageCard: View {
     let page: HomePage
-    let items: [InboxItem]
     @Binding var selectedClothing: ClothingOption
     @Binding var selectedDanceSpeed: DanceSpeed
     let streakTier: Int
@@ -2972,13 +3611,7 @@ private struct DetailPageCard: View {
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .foregroundStyle(DetailCardPalette.secondaryText)
 
-            if page == .inbox {
-                VStack(spacing: 10) {
-                    ForEach(items) { item in
-                        InboxRow(item: item)
-                    }
-                }
-            } else if page == .upgrades {
+            if page == .upgrades {
                 upgradesSection
             } else {
                 VStack(alignment: .leading, spacing: 10) {
@@ -3086,7 +3719,7 @@ private struct DetailPageCard: View {
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color(red: 0.21, green: 0.33, blue: 0.40))
 
-            Text("Effect: +\(streakTier * 4) health per call. Keep logging calls daily to raise this tier.")
+            Text("Keep logging calls daily to raise your streak tier and earn coins for food.")
                 .font(.system(size: 12, weight: .bold, design: .rounded))
                 .foregroundStyle(Color(red: 0.35, green: 0.47, blue: 0.52))
 
@@ -3127,9 +3760,33 @@ private struct DetailPageCard: View {
     }
 }
 
+private struct CurrencyPill: View {
+    let balance: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "circle.hexagongrid.fill")
+                .font(.system(size: 12, weight: .black))
+                .foregroundStyle(Color(red: 0.94, green: 0.62, blue: 0.18))
+
+            Text("\(balance)")
+                .font(.system(size: 13, weight: .black, design: .rounded))
+                .foregroundStyle(DetailCardPalette.bodyText)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            Capsule(style: .continuous)
+                .fill(DetailCardPalette.surfaceStrongFill)
+        )
+    }
+}
+
 private struct LogPageCard: View {
     let contacts: [AppContact]
     @Binding var selectedContactID: UUID?
+    let assignedContact: AppContact?
+    let selectedSpriteName: String
     @Binding var minutes: String
     let defaultCallMinutes: Int
     let entries: [CallLogEntry]
@@ -3157,6 +3814,12 @@ private struct LogPageCard: View {
             Text("Add who you called and how long you talked so the dashboard can track your recent check-ins.")
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .foregroundStyle(DetailCardPalette.secondaryText)
+
+            if let assignedContact {
+                SettingsHint(text: "\(selectedSpriteName)'s health improves when you log calls with \(assignedContact.name).")
+            } else if !contacts.isEmpty {
+                SettingsHint(text: "Assign \(selectedSpriteName) to a contact in Settings before calls can affect its health.")
+            }
 
             RecentLogShortcuts(entries: entries, onSelect: onSelectRecent)
 
@@ -3223,14 +3886,8 @@ private struct LogPageCard: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Recent Calls")
-                    .font(.system(size: 18, weight: .black, design: .rounded))
-                    .foregroundStyle(DetailCardPalette.primaryText)
-
-                ForEach(entries) { entry in
-                    CallLogRow(entry: entry)
-                }
+            if !contacts.isEmpty {
+                RecentCallsList(entries: entries)
             }
         }
         .padding(20)
@@ -3245,6 +3902,103 @@ private struct LogPageCard: View {
         )
         .shadow(color: Color.black.opacity(0.10), radius: 20, y: 10)
         .environment(\.colorScheme, .light)
+    }
+}
+
+private struct RecentCallsList: View {
+    let entries: [CallLogEntry]
+    @State private var page = 0
+
+    private let pageSize = 5
+
+    private var pageCount: Int {
+        max(1, Int(ceil(Double(entries.count) / Double(pageSize))))
+    }
+
+    private var clampedPage: Int {
+        min(max(page, 0), pageCount - 1)
+    }
+
+    private var visibleEntries: [CallLogEntry] {
+        let startIndex = clampedPage * pageSize
+        let endIndex = min(startIndex + pageSize, entries.count)
+        guard startIndex < endIndex else { return [] }
+        return Array(entries[startIndex..<endIndex])
+    }
+
+    private var rangeText: String {
+        guard !entries.isEmpty else { return "No calls logged yet" }
+        let start = clampedPage * pageSize + 1
+        let end = min(start + visibleEntries.count - 1, entries.count)
+        return "Showing \(start)-\(end) of \(entries.count)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Recent Calls")
+                    .font(.system(size: 18, weight: .black, design: .rounded))
+                    .foregroundStyle(DetailCardPalette.primaryText)
+
+                Spacer(minLength: 8)
+
+                Text(rangeText)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(DetailCardPalette.mutedText)
+            }
+
+            if visibleEntries.isEmpty {
+                SettingsHint(text: "Logged calls will appear here.")
+            } else {
+                ForEach(visibleEntries) { entry in
+                    CallLogRow(entry: entry)
+                }
+            }
+
+            if entries.count > pageSize {
+                HStack(spacing: 10) {
+                    Button(action: ButtonClickSound.action(showPreviousPage)) {
+                        Label("Previous", systemImage: "chevron.left")
+                            .font(.system(size: 13, weight: .black, design: .rounded))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(DetailCardPalette.surfaceFill)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(clampedPage == 0)
+                    .opacity(clampedPage == 0 ? 0.45 : 1)
+
+                    Button(action: ButtonClickSound.action(showNextPage)) {
+                        Label("Next", systemImage: "chevron.right")
+                            .font(.system(size: 13, weight: .black, design: .rounded))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(DetailCardPalette.surfaceFill)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(clampedPage >= pageCount - 1)
+                    .opacity(clampedPage >= pageCount - 1 ? 0.45 : 1)
+                }
+                .foregroundStyle(DetailCardPalette.bodyText)
+            }
+        }
+        .onChange(of: entries.count) { _, _ in
+            page = min(page, pageCount - 1)
+        }
+    }
+
+    private func showPreviousPage() {
+        page = max(clampedPage - 1, 0)
+    }
+
+    private func showNextPage() {
+        page = min(clampedPage + 1, pageCount - 1)
     }
 }
 
@@ -3373,6 +4127,8 @@ private struct ContactPickerField: View {
 private struct SettingsPageCard: View {
     let contacts: [AppContact]
     @Binding var preferredContactID: UUID?
+    @Binding var spriteContactAssignments: [String: UUID]
+    let sprites: [TamagotchiSpriteProfile]
     @Binding var pendingContactName: String
     @Binding var notificationPreferences: NotificationPreferences
     @Binding var reminderTime: Date
@@ -3446,6 +4202,31 @@ private struct SettingsPageCard: View {
             }
 
             VStack(alignment: .leading, spacing: 12) {
+                SettingsSectionTitle(title: "Tamagotchi Contacts")
+
+                if contacts.isEmpty {
+                    SettingsHint(text: "Add contacts before assigning them to Tamagotchis.")
+                } else {
+                    ForEach(sprites) { sprite in
+                        ContactAssignmentRow(
+                            sprite: sprite,
+                            contacts: contacts,
+                            selectedContactID: Binding(
+                                get: { spriteContactAssignments[sprite.id] },
+                                set: { newValue in
+                                    if let newValue {
+                                        spriteContactAssignments[sprite.id] = newValue
+                                    } else {
+                                        spriteContactAssignments.removeValue(forKey: sprite.id)
+                                    }
+                                }
+                            )
+                        )
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
                 SettingsSectionTitle(title: "Logging Defaults")
 
                 Stepper(value: $defaultCallMinutes, in: 1...240) {
@@ -3490,7 +4271,7 @@ private struct SettingsPageCard: View {
 
                 SettingsToggleRow(
                     title: "Daily reminders",
-                    subtitle: "Shows a reminder card in Inbox and schedules a local reminder.",
+                    subtitle: "Schedules a local reminder for your default contact.",
                     isOn: $notificationPreferences.dailyRemindersEnabled
                 )
 
@@ -3520,23 +4301,8 @@ private struct SettingsPageCard: View {
 
                 SettingsToggleRow(
                     title: "Low health alerts",
-                    subtitle: "Adds a low-health warning to Inbox and controls system alerts.",
+                    subtitle: "Controls system alerts when health gets low.",
                     isOn: $notificationPreferences.lowHealthAlertsEnabled
-                )
-                SettingsToggleRow(
-                    title: "Streak celebrations",
-                    subtitle: "Keeps streak updates visible in Inbox.",
-                    isOn: $notificationPreferences.streakAlertsEnabled
-                )
-                SettingsToggleRow(
-                    title: "Message updates",
-                    subtitle: "Shows friendly reply-style nudges from your default contact.",
-                    isOn: $notificationPreferences.messageAlertsEnabled
-                )
-                SettingsToggleRow(
-                    title: "Weekly recap",
-                    subtitle: "Surfaces your running weekly summary in Inbox.",
-                    isOn: $notificationPreferences.weeklySummaryEnabled
                 )
             }
         }
@@ -3625,6 +4391,48 @@ private struct ContactSettingsRow: View {
     }
 }
 
+private struct ContactAssignmentRow: View {
+    let sprite: TamagotchiSpriteProfile
+    let contacts: [AppContact]
+    @Binding var selectedContactID: UUID?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            PixelTamagotchi(
+                health: HealthPersistence.defaultHealth,
+                sprite: sprite,
+                clothing: .none,
+                artSize: 42,
+                showsLabels: false,
+                danceSpeed: .normal
+            )
+            .frame(width: 46, height: 46)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(sprite.displayName)
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(DetailCardPalette.bodyText)
+
+                Picker("Assigned contact", selection: $selectedContactID) {
+                    Text("Unassigned").tag(nil as UUID?)
+                    ForEach(contacts) { contact in
+                        Text(contact.name).tag(contact.id as UUID?)
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(DetailCardPalette.bodyText)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(DetailCardPalette.surfaceFill)
+        )
+    }
+}
+
 private struct SettingsToggleRow: View {
     let title: String
     let subtitle: String
@@ -3697,9 +4505,19 @@ private struct CallLogRow: View {
                     .font(.system(size: 15, weight: .bold, design: .rounded))
                     .foregroundStyle(DetailCardPalette.bodyText)
 
-                Text("\(entry.minutes) minute\(entry.minutes == 1 ? "" : "s")")
-                    .font(.system(size: 14, weight: .medium, design: .rounded))
-                    .foregroundStyle(DetailCardPalette.mutedText)
+                HStack(spacing: 6) {
+                    Text("\(entry.minutes) minute\(entry.minutes == 1 ? "" : "s")")
+
+                    Circle()
+                        .fill(DetailCardPalette.mutedText.opacity(0.55))
+                        .frame(width: 4, height: 4)
+
+                    Text(entry.loggedAt.formatted(date: .abbreviated, time: .omitted))
+                }
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(DetailCardPalette.mutedText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.84)
             }
 
             Spacer(minLength: 0)
@@ -3725,36 +4543,6 @@ private struct DetailBullet: View {
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .foregroundStyle(DetailCardPalette.bodyText)
         }
-    }
-}
-
-private struct InboxRow: View {
-    let item: InboxItem
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Circle()
-                .fill(item.kind.color)
-                .frame(width: 12, height: 12)
-                .padding(.top, 6)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(item.title)
-                    .font(.system(size: 15, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color(red: 0.10, green: 0.17, blue: 0.27))
-
-                Text(item.subtitle)
-                    .font(.system(size: 14, weight: .medium, design: .rounded))
-                    .foregroundStyle(Color(red: 0.39, green: 0.49, blue: 0.54))
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.white.opacity(0.72))
-        )
     }
 }
 
@@ -3995,47 +4783,36 @@ private struct SmoothHill: Shape {
     }
 }
 
-private struct InboxItem: Identifiable {
-    enum Kind {
-        case reminder
-        case streak
-        case message
-        case summary
-        case health
-
-        var color: Color {
-            switch self {
-            case .reminder:
-                return Color(red: 0.49, green: 0.84, blue: 0.97)
-            case .streak:
-                return Color(red: 0.49, green: 0.93, blue: 0.72)
-            case .message:
-                return Color(red: 1.0, green: 0.72, blue: 0.45)
-            case .summary:
-                return Color(red: 0.78, green: 0.69, blue: 0.98)
-            case .health:
-                return Color(red: 0.98, green: 0.48, blue: 0.52)
-            }
-        }
-    }
-
-    let id = UUID()
-    let title: String
-    let subtitle: String
-    let kind: Kind
-}
-
 private struct CallLogEntry: Codable, Identifiable, Equatable {
     let id: UUID
+    let contactID: UUID?
     let name: String
     let minutes: Int
     let loggedAt: Date
 
-    init(id: UUID = UUID(), name: String, minutes: Int, loggedAt: Date) {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case contactID
+        case name
+        case minutes
+        case loggedAt
+    }
+
+    init(id: UUID = UUID(), contactID: UUID? = nil, name: String, minutes: Int, loggedAt: Date) {
         self.id = id
+        self.contactID = contactID
         self.name = name
         self.minutes = minutes
         self.loggedAt = loggedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        contactID = try container.decodeIfPresent(UUID.self, forKey: .contactID)
+        name = try container.decode(String.self, forKey: .name)
+        minutes = try container.decode(Int.self, forKey: .minutes)
+        loggedAt = try container.decode(Date.self, forKey: .loggedAt)
     }
 }
 
@@ -4068,6 +4845,17 @@ private enum StreakCalculator {
             return 2
         default:
             return 1
+        }
+    }
+
+    static func foodDiscountPercent(for tier: Int) -> Int {
+        switch tier {
+        case 3...:
+            return 20
+        case 2:
+            return 10
+        default:
+            return 0
         }
     }
 
@@ -4114,6 +4902,70 @@ private enum ClothingOption: String, CaseIterable, Identifiable {
             return Color(red: 0.22, green: 0.48, blue: 0.88)
         case .crown:
             return Color(red: 0.98, green: 0.76, blue: 0.29)
+        }
+    }
+}
+
+private enum FeedingOption: String, CaseIterable, Identifiable {
+    case once
+    case fiveTimes
+
+    var id: String { rawValue }
+    private var unitCost: Int { 12 }
+    private var unitHealthRestored: Double { 18 }
+    private var unitExperienceGain: Int { 24 }
+
+    var feedCount: Int {
+        switch self {
+        case .once:
+            return 1
+        case .fiveTimes:
+            return 5
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .once:
+            return "Feed x1"
+        case .fiveTimes:
+            return "Feed x5"
+        }
+    }
+
+    var baseCost: Int {
+        unitCost * feedCount
+    }
+
+    func cost(streakTier: Int) -> Int {
+        let discountPercent = StreakCalculator.foodDiscountPercent(for: streakTier)
+        let discountedCost = Double(baseCost) * (1 - Double(discountPercent) / 100)
+        return max(1, Int(discountedCost.rounded(.up)))
+    }
+
+    var healthRestored: Double {
+        unitHealthRestored * Double(feedCount)
+    }
+
+    var experienceGain: Int {
+        unitExperienceGain * feedCount
+    }
+
+    var symbol: String {
+        switch self {
+        case .once:
+            return "takeoutbag.and.cup.and.straw.fill"
+        case .fiveTimes:
+            return "fork.knife.circle.fill"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .once:
+            return Color(red: 0.94, green: 0.58, blue: 0.25)
+        case .fiveTimes:
+            return Color(red: 0.18, green: 0.64, blue: 0.52)
         }
     }
 }
@@ -4249,7 +5101,6 @@ private enum HomePage: CaseIterable {
     case upgrades
     case settings
     case log
-    case inbox
 
     static var dockCases: [HomePage] {
         [.home, .upgrades, .settings, .log]
@@ -4265,8 +5116,6 @@ private enum HomePage: CaseIterable {
             return "Settings"
         case .log:
             return "Log"
-        case .inbox:
-            return "Inbox"
         }
     }
 
@@ -4280,8 +5129,6 @@ private enum HomePage: CaseIterable {
             return "Preferences for reminders, contacts, and appearance."
         case .log:
             return "A running history of calls, streaks, and recent check-ins."
-        case .inbox:
-            return "Your notification center for reminders, updates, and replies."
         }
     }
 
@@ -4295,8 +5142,6 @@ private enum HomePage: CaseIterable {
             return "Notification preferences belong here."
         case .log:
             return "Recent activity timeline goes here."
-        case .inbox:
-            return ""
         }
     }
 
@@ -4310,8 +5155,6 @@ private enum HomePage: CaseIterable {
             return "Contact defaults and quiet hours can fit here."
         case .log:
             return "Streak summaries and monthly stats fit naturally here."
-        case .inbox:
-            return ""
         }
     }
 
@@ -4325,8 +5168,6 @@ private enum HomePage: CaseIterable {
             return "Keeping it off home leaves more room for the sprite."
         case .log:
             return "This keeps the landing page uncluttered."
-        case .inbox:
-            return ""
         }
     }
 
@@ -4340,8 +5181,6 @@ private enum HomePage: CaseIterable {
             return "Settings"
         case .log:
             return "Log"
-        case .inbox:
-            return "Inbox"
         }
     }
 
@@ -4355,8 +5194,6 @@ private enum HomePage: CaseIterable {
             return "gearshape.fill"
         case .log:
             return "clock.arrow.circlepath"
-        case .inbox:
-            return "tray.fill"
         }
     }
 
@@ -4370,8 +5207,6 @@ private enum HomePage: CaseIterable {
             return Color(red: 0.44, green: 0.58, blue: 0.94)
         case .log:
             return Color(red: 0.12, green: 0.76, blue: 0.60)
-        case .inbox:
-            return Color(red: 0.97, green: 0.58, blue: 0.42)
         }
     }
 }
@@ -4416,15 +5251,6 @@ private struct SpriteLevel: Codable, Equatable {
     }
 }
 
-private enum LevelCalculator {
-    static func calculateExperienceGain(callMinutes: Int, currentStreak: Int, healthPercent: Double) -> Int {
-        let durationXP = max(5, callMinutes) * 10
-        let streakMultiplier = 1.0 + (Double(min(max(currentStreak, 0), 14)) * 0.03)
-        let lowHealthBonus = healthPercent < 35 ? 20 : 0
-        return Int((Double(durationXP) * streakMultiplier).rounded()) + lowHealthBonus
-    }
-}
-
 private enum LevelPersistence {
     private static let storageKey = "sprite.levels"
 
@@ -4436,11 +5262,16 @@ private enum LevelPersistence {
             return [:]
         }
 
-        return levels
+        let migratedLevels = SpriteIDMigration.migratedLevels(levels)
+        if migratedLevels != levels {
+            save(migratedLevels)
+        }
+        return migratedLevels
     }
 
     static func save(_ levels: [String: SpriteLevel]) {
-        guard let encoded = try? JSONEncoder().encode(levels) else { return }
+        let migratedLevels = SpriteIDMigration.migratedLevels(levels)
+        guard let encoded = try? JSONEncoder().encode(migratedLevels) else { return }
         UserDefaults.standard.set(encoded, forKey: storageKey)
     }
 }
@@ -4474,6 +5305,38 @@ private struct PixelLevelBadge: View {
                 }
                 .frame(width: 44, height: 5)
             }
+        }
+    }
+}
+
+private extension TamagotchiSpriteProfile {
+    var currencyTint: Color {
+        switch id.lowercased() {
+        case "t1", "slime":
+            return Color(red: 0.49, green: 0.85, blue: 0.13)
+        case "imp":
+            return Color(red: 0.90, green: 0.16, blue: 0.20)
+        case "t2", "cecil":
+            return Color(red: 0.18, green: 0.48, blue: 0.95)
+        case "ghost":
+            return Color(red: 0.16, green: 0.17, blue: 0.19)
+        default:
+            return currencyTintFromName
+        }
+    }
+
+    private var currencyTintFromName: Color {
+        switch displayName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "slime":
+            return Color(red: 0.49, green: 0.85, blue: 0.13)
+        case "imp":
+            return Color(red: 0.90, green: 0.16, blue: 0.20)
+        case "cecil":
+            return Color(red: 0.18, green: 0.48, blue: 0.95)
+        case "ghost":
+            return Color(red: 0.16, green: 0.17, blue: 0.19)
+        default:
+            return Color(red: 0.94, green: 0.62, blue: 0.18)
         }
     }
 }

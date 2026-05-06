@@ -28,7 +28,7 @@ final class LocalNotificationManager {
 
         let content = UNMutableNotificationContent()
         content.title = "Health is getting low"
-        content.body = "Log a call soon to recharge your Tamagotchi."
+        content.body = "Feed your Tamagotchi soon to recharge its health."
         content.sound = .default
 
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(1, timeInterval), repeats: false)
