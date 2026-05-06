@@ -311,7 +311,7 @@ struct DashboardView: View {
             isPresented: postCallPromptBinding,
             presenting: postCallPrompt
         ) { session in
-            Button("Save \(estimatedMinutes(for: session)) min") {
+            Button("Save \(loggableMinutes(for: session)) min") {
                 ButtonClickSound.perform {
                     savePendingCall(session)
                 }
@@ -325,7 +325,7 @@ struct DashboardView: View {
 
             Button("Later", role: .cancel) {
                 ButtonClickSound.perform {
-                    clearPendingCallTracking()
+                    deferPendingCallPrompt()
                 }
             }
         } message: { session in
@@ -376,7 +376,7 @@ struct DashboardView: View {
             get: { postCallPrompt != nil },
             set: { isPresented in
                 if !isPresented {
-                    clearPendingCallTracking()
+                    deferPendingCallPrompt()
                 }
             }
         )
@@ -400,7 +400,14 @@ struct DashboardView: View {
             restoreSettings()
             restorePendingCallTracking()
             presentPostCallPromptIfReady()
-        } else if newValue == .background || newValue == .inactive {
+        } else if newValue == .background {
+            markPendingCallDidLeaveApp()
+            persistHealthState()
+            persistAppState()
+            persistSettings()
+            persistPendingCallTracking()
+            syncLowHealthNotification()
+        } else if newValue == .inactive {
             persistHealthState()
             persistAppState()
             persistSettings()
@@ -1199,6 +1206,8 @@ struct DashboardView: View {
             clearPendingCallTracking()
             callFailureMessage = "This device or simulator can't place phone calls from the app. Try again on an iPhone with calling available."
         }
+
+        discardUnconfirmedPendingCallAfterDelay(sessionID: pendingCallSession?.id)
     }
 
     private func handleCallNowQuickAction() {
@@ -1267,6 +1276,11 @@ struct DashboardView: View {
             return
         }
 
+        guard session.didLeaveApp else {
+            discardUnconfirmedPendingCallIfNeeded()
+            return
+        }
+
         let secondsSinceCallStarted = Date().timeIntervalSince(session.startedAt)
         guard secondsSinceCallStarted >= minimumCallPromptDelay else {
             DispatchQueue.main.asyncAfter(deadline: .now() + (minimumCallPromptDelay - secondsSinceCallStarted)) {
@@ -1276,25 +1290,65 @@ struct DashboardView: View {
             return
         }
 
+        let promptSession = session.withFrozenPromptMinutes(loggableMinutes(for: session))
+        pendingCallSession = promptSession
+        persistPendingCallTracking()
         selectedLogContactID = session.contactID
-        logMinutes = String(estimatedMinutes(for: session))
-        postCallPrompt = session
+        logMinutes = String(loggableMinutes(for: promptSession))
+        postCallPrompt = promptSession
     }
 
     private func savePendingCall(_ session: PendingCallSession) {
-        logCall(contactID: session.contactID, name: session.contactName, minutes: estimatedMinutes(for: session))
+        logCall(contactID: session.contactID, name: session.contactName, minutes: loggableMinutes(for: session))
     }
 
     private func reviewPendingCall(_ session: PendingCallSession) {
         selectedLogContactID = session.contactID
-        logMinutes = String(estimatedMinutes(for: session))
+        logMinutes = String(loggableMinutes(for: session))
         postCallPrompt = nil
         navigate(to: .log)
+    }
+
+    private func loggableMinutes(for session: PendingCallSession) -> Int {
+        if let promptMinutes = session.promptMinutes {
+            return max(1, promptMinutes)
+        }
+
+        return estimatedMinutes(for: session)
     }
 
     private func estimatedMinutes(for session: PendingCallSession) -> Int {
         let elapsedMinutes = Int(ceil(Date().timeIntervalSince(session.startedAt) / 60))
         return max(1, elapsedMinutes == 0 ? session.fallbackMinutes : elapsedMinutes)
+    }
+
+    private func deferPendingCallPrompt() {
+        postCallPrompt = nil
+        persistPendingCallTracking()
+    }
+
+    private func markPendingCallDidLeaveApp() {
+        guard var session = pendingCallSession, !session.didLeaveApp else { return }
+        session.didLeaveApp = true
+        pendingCallSession = session
+        persistPendingCallTracking()
+    }
+
+    private func discardUnconfirmedPendingCallAfterDelay(sessionID: UUID?) {
+        guard let sessionID else { return }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + minimumCallPromptDelay) {
+            guard scenePhase == .active else { return }
+            guard pendingCallSession?.id == sessionID else { return }
+            discardUnconfirmedPendingCallIfNeeded()
+        }
+    }
+
+    private func discardUnconfirmedPendingCallIfNeeded() {
+        guard let session = pendingCallSession else { return }
+        guard !session.didLeaveApp else { return }
+        guard Date().timeIntervalSince(session.startedAt) >= minimumCallPromptDelay else { return }
+        clearPendingCallTracking()
     }
 
     private func clearPendingCallTracking() {
@@ -1586,23 +1640,56 @@ private struct PendingCallSession: Codable, Identifiable {
     let contactName: String
     let startedAt: Date
     let fallbackMinutes: Int
+    var didLeaveApp: Bool
+    var promptMinutes: Int?
 
     init(
         id: UUID = UUID(),
         contactID: UUID,
         contactName: String,
         startedAt: Date,
-        fallbackMinutes: Int
+        fallbackMinutes: Int,
+        didLeaveApp: Bool = false,
+        promptMinutes: Int? = nil
     ) {
         self.id = id
         self.contactID = contactID
         self.contactName = contactName
         self.startedAt = startedAt
         self.fallbackMinutes = fallbackMinutes
+        self.didLeaveApp = didLeaveApp
+        self.promptMinutes = promptMinutes
     }
 
     func isStale(maxAge: TimeInterval, now: Date = Date()) -> Bool {
         now.timeIntervalSince(startedAt) > maxAge
+    }
+
+    func withFrozenPromptMinutes(_ minutes: Int) -> PendingCallSession {
+        var session = self
+        session.promptMinutes = promptMinutes ?? max(1, minutes)
+        return session
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case contactID
+        case contactName
+        case startedAt
+        case fallbackMinutes
+        case didLeaveApp
+        case promptMinutes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        contactID = try container.decode(UUID.self, forKey: .contactID)
+        contactName = try container.decode(String.self, forKey: .contactName)
+        startedAt = try container.decode(Date.self, forKey: .startedAt)
+        fallbackMinutes = try container.decode(Int.self, forKey: .fallbackMinutes)
+        didLeaveApp = try container.decodeIfPresent(Bool.self, forKey: .didLeaveApp) ?? false
+        promptMinutes = try container.decodeIfPresent(Int.self, forKey: .promptMinutes)
     }
 }
 
