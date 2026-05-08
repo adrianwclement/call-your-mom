@@ -1,122 +1,73 @@
-# call-your-mom
+# Call Your Mom
 
-`call-your-mom` is a SwiftUI iOS app with a Tamagotchi-style dashboard that encourages users to stay in touch by making calls.
+A SwiftUI iOS app that gamifies calling people you care about (Tamagotchi + call logging + mini-game).
 
-## Project Structure
+## Quick Start
 
-- `call-your-mom/call-your-mom.xcodeproj`: Xcode project
-- `call-your-mom/call-your-mom/`: App source files
-- `call-your-mom/call-your-mom/Assets.xcassets/`: App icons and Tamagotchi image assets
-- `call-your-mom/call-your-mom/.atlas/`: Sprite atlas registry and Tamagotchi manifests
-
-## Prerequisites
-
-Before getting started, make sure you have:
-
-- macOS with Xcode installed
-- Xcode 26 or newer recommended
-- An iPhone simulator runtime or a physical iPhone for testing
-
-This project currently targets iOS `26.4` and uses SwiftUI with Swift `5.0`.
-
-## Startup Instructions
-
-### Working From VS Code
-
-You can use VS Code as your main editor for this project. It works well for editing Swift files, browsing the project, and using the integrated terminal.
-
-You will still need Xcode for iOS-specific tasks like:
-
-- selecting a simulator or device
-- building and running the app
-- using full SwiftUI preview support
-- managing signing for physical devices
-
-From the project root, open the repo in VS Code with:
-
-```bash
-code .
-```
-
-### Open in Xcode
-
-When you are ready to run the app, open the Xcode project:
-
+1. Open project:
 ```bash
 open call-your-mom/call-your-mom.xcodeproj
 ```
+2. In Xcode, select scheme `call-your-mom`.
+3. Pick a simulator/device.
+4. Run with `Cmd+R`.
 
-### Run the App
+## Where To Look First
 
-1. Open the project in Xcode.
-2. Select the `call-your-mom` scheme.
-3. Choose an iPhone simulator or a connected device.
-4. Press `Cmd+R` to build and run.
+- App entry: `call-your-mom/call-your-mom/call_your_momApp.swift`
+- Main tabs: `call-your-mom/call-your-mom/MainTabView.swift`
+- Most app logic/UI: `call-your-mom/call-your-mom/DashboardView.swift`
 
-When the app launches, it opens into a tab-based interface with:
+If you need to change behavior, start in `DashboardView.swift`.
 
-- `Tamagotchi` dashboard
-- `Contacts`
-- `History`
-- `Account`
+## Project Map
 
-## Development Instructions
+- `call-your-mom/call-your-mom/`
+  - Main app source.
+- `call-your-mom/call-your-mom/Assets.xcassets/`
+  - Images, icons, sprite assets.
+- `call-your-mom/call-your-mom/.atlas/`
+  - Sprite atlas manifests/registry.
+- `call-your-mom/call-your-mom/SFX/`
+  - Sound effect files (bundle these in Xcode target).
 
-### Main Entry Point
+## Common Tasks
 
-The app starts in `call-your-mom/call_your_momApp.swift`, which loads `MainTabView`.
+### Add / swap sound effects
 
-### Key Views
+Put files in:
+- `call-your-mom/call-your-mom/SFX/`
 
-- `call-your-mom/MainTabView.swift`: Root tab navigation
-- `call-your-mom/DashboardView.swift`: Main Tamagotchi dashboard UI and health decay behavior
-- `call-your-mom/ContactsView.swift`: Contacts tab placeholder
-- `call-your-mom/HistoryView.swift`: History tab placeholder
-- `call-your-mom/AccountView.swift`: Account tab placeholder
+Default names used by code:
+- `sfx_level_up` (level-up)
+- `sfx_flappy_flap` (flappy flap)
 
-### Adding New Tamagotchis
+Then in Xcode ensure each file is included in target `call-your-mom` (`Target Membership` or `Copy Bundle Resources`).
 
-The dashboard now supports loading additional playable Tamagotchis from `.atlas` manifests.
+### Add a new sprite
 
-1. Add your sprite sheet to `call-your-mom/call-your-mom/Assets.xcassets`.
-2. Create a new manifest in `call-your-mom/call-your-mom/.atlas/` (copy `manifest.template.json`).
-3. Define `atlas.idleAnimation` frames and `fps` in the manifest.
-4. Register that manifest name in `call-your-mom/call-your-mom/.atlas/registry.json`.
-5. Launch the app; the new Tamagotchi appears in the Sprite section automatically.
+1. Add art to `Assets.xcassets`.
+2. Add/edit atlas manifest in `.atlas/`.
+3. Register it in `.atlas/registry.json`.
 
-### Typical Development Workflow
+### Modify garden / movement / physics
 
-1. Open the repo in VS Code with `code .`.
-2. Edit files in `call-your-mom/`.
-3. Use the VS Code terminal for git, file search, and build commands.
-4. Open Xcode when you want to run the app on a simulator or device.
-5. Verify the dashboard behavior, especially:
-   - health decay over time
-   - Tamagotchi mood image changes
-   - button interactions in the dashboard
+- File: `call-your-mom/call-your-mom/DashboardView.swift`
+- Search for: `PixelGardenPlaygroundView`.
 
-### Terminal Build Option
+### Modify level system
 
-If your local Xcode command line tools are set up correctly, you can also build from the terminal:
+- File: `call-your-mom/call-your-mom/DashboardView.swift`
+- Search for: `SpriteLevel`, `LevelCalculator`, `LevelPersistence`.
+
+## Build From Terminal (optional)
 
 ```bash
 xcodebuild -project call-your-mom/call-your-mom.xcodeproj -scheme call-your-mom -configuration Debug build
 ```
 
-## Current State
+## Notes
 
-- No backend or external services are required for local development
-- No package manager setup is required
-- No automated test target is currently checked into the project
-
-## Troubleshooting
-
-### Xcode command line tools issues
-
-If `xcodebuild` fails locally because Xcode components are not fully initialized, try:
-
-```bash
-xcodebuild -runFirstLaunch
-```
-
-You may also need to open Xcode once and allow it to finish installing required components.
+- No backend required.
+- Most state is local (`UserDefaults` + local persistence helpers).
+- If behavior seems off, check `DashboardView.swift` first before digging elsewhere.
