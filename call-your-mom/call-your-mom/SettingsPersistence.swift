@@ -19,10 +19,58 @@ struct AppContact: Codable, Identifiable, Hashable {
     }
 }
 
+enum CallReminderFrequency: String, Codable, CaseIterable, Identifiable {
+    case daily
+    case everyOtherDay
+    case weekly
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .daily:
+            return "Every day"
+        case .everyOtherDay:
+            return "Every other day"
+        case .weekly:
+            return "Once a week"
+        }
+    }
+}
+
+struct CallReminder: Codable, Identifiable, Equatable {
+    let id: UUID
+    var contactID: UUID
+    var frequency: CallReminderFrequency
+    var hour: Int
+    var minute: Int
+    var weekday: Int
+    var isEnabled: Bool
+
+    init(
+        id: UUID = UUID(),
+        contactID: UUID,
+        frequency: CallReminderFrequency = .daily,
+        hour: Int = 20,
+        minute: Int = 0,
+        weekday: Int = Calendar.current.component(.weekday, from: Date()),
+        isEnabled: Bool = true
+    ) {
+        self.id = id
+        self.contactID = contactID
+        self.frequency = frequency
+        self.hour = min(max(hour, 0), 23)
+        self.minute = min(max(minute, 0), 59)
+        self.weekday = min(max(weekday, 1), 7)
+        self.isEnabled = isEnabled
+    }
+}
+
 struct NotificationPreferences: Codable, Equatable {
     var dailyRemindersEnabled = true
     var reminderHour = 20
     var reminderMinute = 0
+    var callReminders: [CallReminder] = []
     var lowHealthAlertsEnabled = true
     var streakAlertsEnabled = true
     var messageAlertsEnabled = true
@@ -32,6 +80,7 @@ struct NotificationPreferences: Codable, Equatable {
         case dailyRemindersEnabled
         case reminderHour
         case reminderMinute
+        case callReminders
         case lowHealthAlertsEnabled
         case streakAlertsEnabled
         case messageAlertsEnabled
@@ -42,6 +91,7 @@ struct NotificationPreferences: Codable, Equatable {
         dailyRemindersEnabled: Bool = true,
         reminderHour: Int = 20,
         reminderMinute: Int = 0,
+        callReminders: [CallReminder] = [],
         lowHealthAlertsEnabled: Bool = true,
         streakAlertsEnabled: Bool = true,
         messageAlertsEnabled: Bool = true,
@@ -50,6 +100,7 @@ struct NotificationPreferences: Codable, Equatable {
         self.dailyRemindersEnabled = dailyRemindersEnabled
         self.reminderHour = reminderHour
         self.reminderMinute = reminderMinute
+        self.callReminders = callReminders
         self.lowHealthAlertsEnabled = lowHealthAlertsEnabled
         self.streakAlertsEnabled = streakAlertsEnabled
         self.messageAlertsEnabled = messageAlertsEnabled
@@ -61,6 +112,7 @@ struct NotificationPreferences: Codable, Equatable {
         dailyRemindersEnabled = try container.decodeIfPresent(Bool.self, forKey: .dailyRemindersEnabled) ?? true
         reminderHour = try container.decodeIfPresent(Int.self, forKey: .reminderHour) ?? 20
         reminderMinute = try container.decodeIfPresent(Int.self, forKey: .reminderMinute) ?? 0
+        callReminders = try container.decodeIfPresent([CallReminder].self, forKey: .callReminders) ?? []
         lowHealthAlertsEnabled = try container.decodeIfPresent(Bool.self, forKey: .lowHealthAlertsEnabled) ?? true
         streakAlertsEnabled = try container.decodeIfPresent(Bool.self, forKey: .streakAlertsEnabled) ?? true
         messageAlertsEnabled = try container.decodeIfPresent(Bool.self, forKey: .messageAlertsEnabled) ?? true
@@ -72,6 +124,7 @@ struct NotificationPreferences: Codable, Equatable {
         try container.encode(dailyRemindersEnabled, forKey: .dailyRemindersEnabled)
         try container.encode(reminderHour, forKey: .reminderHour)
         try container.encode(reminderMinute, forKey: .reminderMinute)
+        try container.encode(callReminders, forKey: .callReminders)
         try container.encode(lowHealthAlertsEnabled, forKey: .lowHealthAlertsEnabled)
         try container.encode(streakAlertsEnabled, forKey: .streakAlertsEnabled)
         try container.encode(messageAlertsEnabled, forKey: .messageAlertsEnabled)
@@ -113,7 +166,7 @@ struct AppSettings: Codable, Equatable {
         contacts = try container.decodeIfPresent([AppContact].self, forKey: .contacts) ?? []
         preferredContactID = try container.decodeIfPresent(UUID.self, forKey: .preferredContactID)
         spriteContactAssignments = try container.decodeIfPresent([String: UUID].self, forKey: .spriteContactAssignments) ?? [:]
-        defaultCallMinutes = try container.decodeIfPresent(Int.self, forKey: .defaultCallMinutes) ?? 15
+        defaultCallMinutes = try container.decodeIfPresent(Int.self, forKey: .defaultCallMinutes) ?? 0
         notificationPreferences = try container.decodeIfPresent(NotificationPreferences.self, forKey: .notificationPreferences) ?? NotificationPreferences()
     }
 }
@@ -127,7 +180,7 @@ enum SettingsPersistence {
         contacts: [],
         preferredContactID: nil,
         spriteContactAssignments: [:],
-        defaultCallMinutes: 15,
+        defaultCallMinutes: 0,
         notificationPreferences: NotificationPreferences()
     )
 
@@ -147,9 +200,15 @@ enum SettingsPersistence {
         let contactIDs = Set(contacts.map(\.id))
         let spriteContactAssignments = migratedSpriteContactAssignments(decoded.spriteContactAssignments)
             .filter { contactIDs.contains($0.value) }
-        let defaultCallMinutes = min(max(decoded.defaultCallMinutes, 1), 240)
+        let callReminders = decoded.notificationPreferences.callReminders
+            .filter { contactIDs.contains($0.contactID) }
+            .map(sanitizedReminder)
+        let defaultCallMinutes = min(max(decoded.defaultCallMinutes, 0), 240)
         let reminderHour = min(max(decoded.notificationPreferences.reminderHour, 0), 23)
         let reminderMinute = min(max(decoded.notificationPreferences.reminderMinute, 0), 59)
+        let migratedCallReminders = callReminders.isEmpty && decoded.notificationPreferences.dailyRemindersEnabled
+            ? legacyReminder(contactID: preferredContactID, hour: reminderHour, minute: reminderMinute)
+            : callReminders
 
         return AppSettings(
             contacts: contacts,
@@ -160,6 +219,7 @@ enum SettingsPersistence {
                 dailyRemindersEnabled: decoded.notificationPreferences.dailyRemindersEnabled,
                 reminderHour: reminderHour,
                 reminderMinute: reminderMinute,
+                callReminders: migratedCallReminders,
                 lowHealthAlertsEnabled: decoded.notificationPreferences.lowHealthAlertsEnabled,
                 streakAlertsEnabled: decoded.notificationPreferences.streakAlertsEnabled,
                 messageAlertsEnabled: decoded.notificationPreferences.messageAlertsEnabled,
@@ -169,12 +229,25 @@ enum SettingsPersistence {
     }
 
     static func save(_ settings: AppSettings) {
+        let contactIDs = Set(settings.contacts.map(\.id))
+        let notificationPreferences = NotificationPreferences(
+            dailyRemindersEnabled: settings.notificationPreferences.dailyRemindersEnabled,
+            reminderHour: settings.notificationPreferences.reminderHour,
+            reminderMinute: settings.notificationPreferences.reminderMinute,
+            callReminders: settings.notificationPreferences.callReminders
+                .filter { contactIDs.contains($0.contactID) }
+                .map(sanitizedReminder),
+            lowHealthAlertsEnabled: settings.notificationPreferences.lowHealthAlertsEnabled,
+            streakAlertsEnabled: settings.notificationPreferences.streakAlertsEnabled,
+            messageAlertsEnabled: settings.notificationPreferences.messageAlertsEnabled,
+            weeklySummaryEnabled: settings.notificationPreferences.weeklySummaryEnabled
+        )
         let sanitizedSettings = AppSettings(
             contacts: settings.contacts,
             preferredContactID: settings.preferredContactID,
             spriteContactAssignments: migratedSpriteContactAssignments(settings.spriteContactAssignments),
             defaultCallMinutes: settings.defaultCallMinutes,
-            notificationPreferences: settings.notificationPreferences
+            notificationPreferences: notificationPreferences
         )
         guard let encoded = try? JSONEncoder().encode(sanitizedSettings) else { return }
         defaults.set(encoded, forKey: storageKey)
@@ -197,6 +270,23 @@ enum SettingsPersistence {
             migrated.removeValue(forKey: legacyID)
         }
         return migrated
+    }
+
+    private static func legacyReminder(contactID: UUID?, hour: Int, minute: Int) -> [CallReminder] {
+        guard let contactID else { return [] }
+        return [CallReminder(contactID: contactID, frequency: .daily, hour: hour, minute: minute)]
+    }
+
+    private static func sanitizedReminder(_ reminder: CallReminder) -> CallReminder {
+        CallReminder(
+            id: reminder.id,
+            contactID: reminder.contactID,
+            frequency: reminder.frequency,
+            hour: reminder.hour,
+            minute: reminder.minute,
+            weekday: reminder.weekday,
+            isEnabled: reminder.isEnabled
+        )
     }
 
     private static func removingUntouchedStarterContacts(from contacts: [AppContact]) -> [AppContact] {

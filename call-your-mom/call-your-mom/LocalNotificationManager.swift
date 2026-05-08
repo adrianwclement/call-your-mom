@@ -14,6 +14,7 @@ final class LocalNotificationManager {
     static let lowHealthThreshold = 25.0
     private let lowHealthIdentifier = "low-health-alert"
     private let dailyReminderIdentifier = "daily-call-reminder"
+    private let callReminderIdentifierPrefix = "call-reminder-"
     private let postCallLogIdentifier = "post-call-log-reminder"
 
     private init() {}
@@ -47,14 +48,14 @@ final class LocalNotificationManager {
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [lowHealthIdentifier])
     }
 
-    func scheduleDailyReminder(hour: Int, minute: Int = 0, contactName: String, minutes: Int) {
+    func scheduleDailyReminder(hour: Int, minute: Int = 0, contactName: String) {
         var components = DateComponents()
         components.hour = min(max(hour, 0), 23)
         components.minute = min(max(minute, 0), 59)
 
         let content = UNMutableNotificationContent()
         content.title = "Daily call reminder"
-        content.body = "Check in with \(contactName) for about \(minutes) minute\(minutes == 1 ? "" : "s")."
+        content.body = "Check in with \(contactName) today."
         content.sound = .default
 
         let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: true)
@@ -71,6 +72,76 @@ final class LocalNotificationManager {
 
     func clearDailyReminderNotification() {
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [dailyReminderIdentifier])
+    }
+
+    func scheduleCallReminders(_ reminders: [CallReminder], contacts: [AppContact]) {
+        clearCallReminderNotifications {
+            let contactsByID = Dictionary(uniqueKeysWithValues: contacts.map { ($0.id, $0) })
+            for reminder in reminders where reminder.isEnabled {
+                guard let contact = contactsByID[reminder.contactID] else { continue }
+                self.scheduleCallReminder(reminder, contactName: contact.name)
+            }
+        }
+    }
+
+    func clearCallReminderNotifications(completion: (() -> Void)? = nil) {
+        let center = UNUserNotificationCenter.current()
+        center.getPendingNotificationRequests { [dailyReminderIdentifier, callReminderIdentifierPrefix] requests in
+            let identifiers = requests
+                .map(\.identifier)
+                .filter { $0 == dailyReminderIdentifier || $0.hasPrefix(callReminderIdentifierPrefix) }
+
+            center.removePendingNotificationRequests(withIdentifiers: identifiers)
+            completion?()
+        }
+    }
+
+    private func scheduleCallReminder(_ reminder: CallReminder, contactName: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Call \(contactName)?"
+        content.body = "Check in with \(contactName) when you have a minute."
+        content.sound = .default
+
+        let trigger: UNNotificationTrigger
+        switch reminder.frequency {
+        case .daily:
+            var components = DateComponents()
+            components.hour = reminder.hour
+            components.minute = reminder.minute
+            trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: true)
+        case .weekly:
+            var components = DateComponents()
+            components.weekday = reminder.weekday
+            components.hour = reminder.hour
+            components.minute = reminder.minute
+            trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: true)
+        case .everyOtherDay:
+            trigger = UNTimeIntervalNotificationTrigger(
+                timeInterval: nextEveryOtherDayInterval(hour: reminder.hour, minute: reminder.minute),
+                repeats: true
+            )
+        }
+
+        let request = UNNotificationRequest(
+            identifier: "\(callReminderIdentifierPrefix)\(reminder.id.uuidString)",
+            content: content,
+            trigger: trigger
+        )
+
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    private func nextEveryOtherDayInterval(hour: Int, minute: Int, now: Date = Date(), calendar: Calendar = .current) -> TimeInterval {
+        var components = calendar.dateComponents([.year, .month, .day], from: now)
+        components.hour = min(max(hour, 0), 23)
+        components.minute = min(max(minute, 0), 59)
+        components.second = 0
+
+        let todayAtTime = calendar.date(from: components) ?? now
+        let nextFire = todayAtTime > now
+            ? todayAtTime
+            : calendar.date(byAdding: .day, value: 1, to: todayAtTime) ?? now.addingTimeInterval(24 * 60 * 60)
+        return max(60, nextFire.timeIntervalSince(now))
     }
 
     func schedulePostCallLogReminder(contactName: String, after timeInterval: TimeInterval) {

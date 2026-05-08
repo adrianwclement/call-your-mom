@@ -9,6 +9,7 @@ import SwiftUI
 import Contacts
 import ContactsUI
 import AVFoundation
+import CallKit
 internal import Combine
 
 enum ButtonClickSound {
@@ -113,6 +114,7 @@ private extension Data {
 struct DashboardView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
+    @StateObject private var callActivityObserver = CallActivityObserver()
 
     @State private var activePage: HomePage = .home
     @State private var pageHistory: [HomePage] = []
@@ -126,7 +128,6 @@ struct DashboardView: View {
     @State private var preferredContactID = SettingsPersistence.defaultSettings.preferredContactID
     @State private var selectedLogContactID = SettingsPersistence.defaultSettings.preferredContactID
     @State private var spriteContactAssignments = SettingsPersistence.defaultSettings.spriteContactAssignments
-    @State private var pendingContactName = ""
     @State private var logMinutes: String = ""
     @State private var defaultCallMinutes = SettingsPersistence.defaultSettings.defaultCallMinutes
     @State private var notificationPreferences = SettingsPersistence.defaultSettings.notificationPreferences
@@ -146,7 +147,7 @@ struct DashboardView: View {
     @State private var postCallPrompt: PendingCallSession?
     @State private var callFailureMessage: String?
     @State private var isReminderPickerPresented = false
-    @State private var reminderDraftDate = Date()
+    @State private var reminderDraft = CallReminderDraft()
     @State private var isDefaultContactPickerPresented = false
     @State private var selectedDefaultContactDraftID: UUID?
     @State private var isDefaultContactPromptPresented = false
@@ -274,11 +275,11 @@ struct DashboardView: View {
                 persistSettings()
                 syncNotificationSchedules()
             }
-            .onChange(of: defaultCallMinutes) { _, _ in
-                handleDefaultCallMinutesChange()
-            }
             .onChange(of: activePage) { _, newValue in
                 presentDefaultContactPromptIfNeeded(for: newValue)
+            }
+            .onChange(of: callActivityObserver.latestEvent) { _, event in
+                handleCallActivity(event)
             }
     }
 
@@ -290,8 +291,9 @@ struct DashboardView: View {
                 }
             }
             .sheet(isPresented: $isReminderPickerPresented) {
-                ReminderTimePickerSheet(
-                    selectedDate: $reminderDraftDate,
+                ReminderEditorSheet(
+                    contacts: contacts,
+                    draft: $reminderDraft,
                     onSave: applyReminderDraft
                 )
             }
@@ -396,8 +398,9 @@ struct DashboardView: View {
     private func handleScenePhaseChange(_ oldValue: ScenePhase, _ newValue: ScenePhase) {
         if newValue == .active {
             reloadSpriteCatalog()
-            restorePersistedHealth()
             restoreSettings()
+            ensureSelectedSpriteCanBeUsed()
+            restorePersistedHealth()
             restorePendingCallTracking()
             presentPostCallPromptIfReady()
         } else if newValue == .background {
@@ -432,19 +435,11 @@ struct DashboardView: View {
 
     private func handleSpriteContactAssignmentsChange() {
         sanitizeSpriteContactAssignments()
+        ensureSelectedSpriteCanBeUsed()
         if let currentAssignedContactID {
             selectedLogContactID = currentAssignedContactID
         }
         persistSettings()
-    }
-
-    private func handleDefaultCallMinutesChange() {
-        defaultCallMinutes = min(max(defaultCallMinutes, 1), 240)
-        if logMinutes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            logMinutes = String(defaultCallMinutes)
-        }
-        persistSettings()
-        syncNotificationSchedules()
     }
 
     private func importDefaultContactFromPrompt() {
@@ -462,9 +457,10 @@ struct DashboardView: View {
         migrateLegacyCurrencyIfNeeded()
         loadSpriteLevels()
         LocalNotificationManager.shared.requestAuthorization()
+        restoreSettings()
+        ensureSelectedSpriteCanBeUsed()
         restorePersistedHealth()
         activateDefaultSpriteHealthIfNeeded()
-        restoreSettings()
         restorePendingCallTracking()
         refreshStreakDays()
         syncNotificationSchedules()
@@ -671,6 +667,7 @@ struct DashboardView: View {
                         selectedSprite: selectedSprite,
                         selectedClothing: selectedClothing,
                         selectedDanceSpeed: selectedDanceSpeed,
+                        assignedSpriteIDs: assignedSpriteIDs,
                         onSelectSprite: selectSprite,
                         spriteLevels: spriteLevels
                     )
@@ -705,6 +702,7 @@ struct DashboardView: View {
                                 isGameMode: isShowingGame,
                                 hidesSprite: isLaunchingGame,
                                 isHibernating: isHibernating,
+                                isContactAssigned: selectedSpriteCanBeUsed,
                                 currencyBalance: currentCurrencyBalance,
                                 currencyTint: selectedSprite.currencyTint,
                                 streakTier: streakTier,
@@ -724,7 +722,7 @@ struct DashboardView: View {
                     .frame(minHeight: metrics.minContentHeight)
 
                     PixelGardenPlaygroundView(
-                        sprites: availableSprites,
+                        sprites: availableSprites.filter(spriteCanBeUsed),
                         selectedClothing: selectedClothing,
                         isHibernating: isHibernating,
                         onLaunchGame: enterGameMode
@@ -789,6 +787,17 @@ struct DashboardView: View {
         return contacts.first(where: { $0.id == currentAssignedContactID })
     }
 
+    private var assignedSpriteIDs: Set<String> {
+        let contactIDs = Set(contacts.map(\.id))
+        return Set(spriteContactAssignments.compactMap { spriteID, contactID in
+            contactIDs.contains(contactID) ? spriteID : nil
+        })
+    }
+
+    private var selectedSpriteCanBeUsed: Bool {
+        spriteCanBeUsed(selectedSprite)
+    }
+
     private var visibleHealth: Double {
         isHibernating ? 0 : health
     }
@@ -798,7 +807,26 @@ struct DashboardView: View {
     }
 
     private func selectSprite(_ sprite: TamagotchiSpriteProfile) {
+        guard spriteCanBeUsed(sprite) else {
+            navigate(to: .settings)
+            return
+        }
         applySelectedSprite(sprite, activateHealth: true)
+    }
+
+    private func spriteCanBeUsed(_ sprite: TamagotchiSpriteProfile) -> Bool {
+        guard let contactID = spriteContactAssignments[sprite.id] else { return false }
+        return contacts.contains(where: { $0.id == contactID })
+    }
+
+    private func firstUsableSprite() -> TamagotchiSpriteProfile? {
+        availableSprites.first(where: spriteCanBeUsed)
+    }
+
+    private func ensureSelectedSpriteCanBeUsed() {
+        guard !selectedSpriteCanBeUsed else { return }
+        guard let replacement = firstUsableSprite(), replacement.id != selectedSprite.id else { return }
+        applySelectedSprite(replacement, activateHealth: false)
     }
 
     private func applySelectedSprite(_ sprite: TamagotchiSpriteProfile, activateHealth: Bool) {
@@ -830,11 +858,16 @@ struct DashboardView: View {
     private func activateDefaultSpriteHealthIfNeeded() {
         let defaultSprite = TamagotchiSpriteCatalog.preferredInitialSprite(from: availableSprites)
         guard selectedSprite.id == defaultSprite.id else { return }
+        guard selectedSpriteCanBeUsed else { return }
         activateCurrentSpriteHealthIfNeeded()
     }
 
     private func handleDashboardLogCall() {
         guard !isSuppressingHomePanelTap else { return }
+        guard selectedSpriteCanBeUsed else {
+            navigate(to: .settings)
+            return
+        }
         selectedLogContactID = currentAssignedContactID ?? preferredContactID ?? contacts.first?.id
         navigate(to: .log)
     }
@@ -873,7 +906,7 @@ struct DashboardView: View {
             earnCurrency(callCurrencyReward(for: minutes), for: spriteID)
         }
         selectedLogContactID = currentAssignedContactID ?? preferredContactID
-        logMinutes = String(defaultCallMinutes)
+        logMinutes = ""
         clearPendingCallTracking()
     }
 
@@ -882,6 +915,7 @@ struct DashboardView: View {
     }
 
     private func earnCurrency(_ amount: Int) {
+        guard selectedSpriteCanBeUsed else { return }
         earnCurrency(amount, for: selectedSprite.id)
     }
 
@@ -892,6 +926,10 @@ struct DashboardView: View {
     }
 
     private func buyFood(_ option: FeedingOption) {
+        guard selectedSpriteCanBeUsed else {
+            navigate(to: .settings)
+            return
+        }
         let cost = option.cost(streakTier: streakTier)
         guard currentCurrencyBalance >= cost else { return }
 
@@ -991,7 +1029,6 @@ struct DashboardView: View {
                         assignedContact: currentAssignedContact,
                         selectedSpriteName: selectedSprite.displayName,
                         minutes: $logMinutes,
-                        defaultCallMinutes: defaultCallMinutes,
                         entries: callLogs,
                         onSubmit: submitLogEntry,
                         onSelectRecent: selectRecentLogEntry,
@@ -1005,13 +1042,11 @@ struct DashboardView: View {
                         preferredContactID: $preferredContactID,
                         spriteContactAssignments: $spriteContactAssignments,
                         sprites: availableSprites,
-                        pendingContactName: $pendingContactName,
                         notificationPreferences: $notificationPreferences,
-                        reminderTime: reminderDateBinding,
-                        defaultCallMinutes: $defaultCallMinutes,
-                        onAddContact: addContact,
                         onImportContact: { isContactPickerPresented = true },
-                        onDeleteContact: deleteContact
+                        onDeleteContact: deleteContact,
+                        onAddReminder: beginAddingReminder,
+                        onDeleteReminder: deleteReminder
                     )
                 } else {
                     DetailPageCard(
@@ -1112,9 +1147,7 @@ struct DashboardView: View {
         notificationPreferences = settings.notificationPreferences
         selectedLogContactID = spriteContactAssignments[selectedSprite.id] ?? settings.preferredContactID ?? settings.contacts.first?.id
 
-        if logMinutes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            logMinutes = String(settings.defaultCallMinutes)
-        }
+        logMinutes = logMinutes.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func presentDefaultContactPromptIfNeeded(for page: HomePage) {
@@ -1137,14 +1170,6 @@ struct DashboardView: View {
                 notificationPreferences: notificationPreferences
             )
         )
-    }
-
-    private func addContact() {
-        let trimmedName = pendingContactName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty else { return }
-
-        upsertContact(name: trimmedName, phoneNumber: nil)
-        pendingContactName = ""
     }
 
     private func importSystemContact(_ contact: CNContact) {
@@ -1192,15 +1217,11 @@ struct DashboardView: View {
             contactID: contact.id,
             contactName: contact.name,
             startedAt: Date(),
-            fallbackMinutes: defaultCallMinutes
+            fallbackMinutes: 0
         )
         persistPendingCallTracking()
         selectedLogContactID = contact.id
-        logMinutes = String(defaultCallMinutes)
-        LocalNotificationManager.shared.schedulePostCallLogReminder(
-            contactName: contact.name,
-            after: max(300, TimeInterval(defaultCallMinutes * 60 + 60))
-        )
+        logMinutes = ""
         openURL(url) { accepted in
             guard !accepted else { return }
             clearPendingCallTracking()
@@ -1221,7 +1242,7 @@ struct DashboardView: View {
         }
 
         selectedLogContactID = preferredContact.id
-        logMinutes = String(defaultCallMinutes)
+        logMinutes = ""
 
         guard let phoneNumber = preferredContact.phoneNumber, !phoneNumber.digitsOnly.isEmpty else {
             callFailureMessage = "Your default contact needs a phone number before Call now can start a call."
@@ -1232,20 +1253,66 @@ struct DashboardView: View {
         callContact(preferredContact)
     }
 
+    private func handleCallActivity(_ event: CallActivityEvent?) {
+        guard let event, var session = pendingCallSession else { return }
+
+        switch event.kind {
+        case .outgoing:
+            guard !session.didObserveOutgoingCall else { return }
+            session.didObserveOutgoingCall = true
+            session.callStartedAt = event.occurredAt
+            pendingCallSession = session
+            persistPendingCallTracking()
+            LocalNotificationManager.shared.schedulePostCallLogReminder(
+                contactName: session.contactName,
+                after: 300
+            )
+        case .connected:
+            session.didObserveOutgoingCall = true
+            session.callStartedAt = event.occurredAt
+            pendingCallSession = session
+            persistPendingCallTracking()
+        case .ended:
+            guard session.didObserveOutgoingCall else {
+                clearPendingCallTracking()
+                return
+            }
+            session.callEndedAt = event.occurredAt
+            session = session.withFrozenPromptMinutes(loggableMinutes(for: session))
+            pendingCallSession = session
+            persistPendingCallTracking()
+            if scenePhase == .active {
+                presentPostCallPromptIfReady()
+            }
+        }
+    }
+
     private func handleSetReminderQuickAction() {
         withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
             quickActionsExpanded = false
         }
 
-        notificationPreferences.dailyRemindersEnabled = true
-        reminderDraftDate = reminderDateBinding.wrappedValue
-        isReminderPickerPresented = true
+        beginAddingReminder()
     }
 
     private func applyReminderDraft() {
-        reminderDateBinding.wrappedValue = reminderDraftDate
-        notificationPreferences.dailyRemindersEnabled = true
+        guard let reminder = reminderDraft.makeReminder() else { return }
+        notificationPreferences.callReminders.append(reminder)
         isReminderPickerPresented = false
+    }
+
+    private func beginAddingReminder() {
+        guard !contacts.isEmpty else {
+            navigate(to: .settings)
+            return
+        }
+
+        reminderDraft = CallReminderDraft(contactID: preferredContactID ?? contacts.first?.id)
+        isReminderPickerPresented = true
+    }
+
+    private func deleteReminder(_ reminder: CallReminder) {
+        notificationPreferences.callReminders.removeAll { $0.id == reminder.id }
     }
 
     private func handleChooseContactQuickAction() {
@@ -1281,9 +1348,30 @@ struct DashboardView: View {
             return
         }
 
+        guard session.didObserveOutgoingCall else {
+            discardUnconfirmedPendingCallIfNeeded()
+            return
+        }
+
+        guard session.callEndedAt != nil else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                guard scenePhase == .active else { return }
+                presentPostCallPromptIfReady()
+            }
+            return
+        }
+
         let secondsSinceCallStarted = Date().timeIntervalSince(session.startedAt)
         guard secondsSinceCallStarted >= minimumCallPromptDelay else {
             DispatchQueue.main.asyncAfter(deadline: .now() + (minimumCallPromptDelay - secondsSinceCallStarted)) {
+                guard scenePhase == .active else { return }
+                presentPostCallPromptIfReady()
+            }
+            return
+        }
+
+        guard !isGameMode, !isLaunchingGame else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 guard scenePhase == .active else { return }
                 presentPostCallPromptIfReady()
             }
@@ -1318,7 +1406,8 @@ struct DashboardView: View {
     }
 
     private func estimatedMinutes(for session: PendingCallSession) -> Int {
-        let elapsedMinutes = Int(ceil(Date().timeIntervalSince(session.startedAt) / 60))
+        let endDate = session.callEndedAt ?? Date()
+        let elapsedMinutes = Int(ceil(endDate.timeIntervalSince(session.callStartedAt ?? session.startedAt) / 60))
         return max(1, elapsedMinutes == 0 ? session.fallbackMinutes : elapsedMinutes)
     }
 
@@ -1346,7 +1435,7 @@ struct DashboardView: View {
 
     private func discardUnconfirmedPendingCallIfNeeded() {
         guard let session = pendingCallSession else { return }
-        guard !session.didLeaveApp else { return }
+        guard !session.didObserveOutgoingCall else { return }
         guard Date().timeIntervalSince(session.startedAt) >= minimumCallPromptDelay else { return }
         clearPendingCallTracking()
     }
@@ -1397,6 +1486,12 @@ struct DashboardView: View {
             selectedLogContactID = preferredContactID ?? contacts.first?.id
         }
 
+        let contactIDs = Set(contacts.map(\.id))
+        let sanitizedReminders = notificationPreferences.callReminders.filter { contactIDs.contains($0.contactID) }
+        if sanitizedReminders != notificationPreferences.callReminders {
+            notificationPreferences.callReminders = sanitizedReminders
+        }
+
         sanitizeSpriteContactAssignments()
     }
 
@@ -1409,16 +1504,10 @@ struct DashboardView: View {
     }
 
     private func syncNotificationSchedules() {
-        if notificationPreferences.dailyRemindersEnabled, let contact = preferredContact {
-            LocalNotificationManager.shared.scheduleDailyReminder(
-                hour: notificationPreferences.reminderHour,
-                minute: notificationPreferences.reminderMinute,
-                contactName: contact.name,
-                minutes: defaultCallMinutes
-            )
-        } else {
-            LocalNotificationManager.shared.clearDailyReminderNotification()
-        }
+        LocalNotificationManager.shared.scheduleCallReminders(
+            notificationPreferences.callReminders,
+            contacts: contacts
+        )
 
         syncLowHealthNotification()
     }
@@ -1441,35 +1530,6 @@ struct DashboardView: View {
         }
 
         return (recentLogs.count, totalMinutes, subtitle)
-    }
-
-    private var formattedReminderHour: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "h:mm a"
-
-        let components = DateComponents(
-            hour: notificationPreferences.reminderHour,
-            minute: notificationPreferences.reminderMinute
-        )
-        let date = Calendar.current.date(from: components) ?? Date()
-        return formatter.string(from: date)
-    }
-
-    private var reminderDateBinding: Binding<Date> {
-        Binding(
-            get: {
-                let components = DateComponents(
-                    hour: notificationPreferences.reminderHour,
-                    minute: notificationPreferences.reminderMinute
-                )
-                return Calendar.current.date(from: components) ?? Date()
-            },
-            set: { newValue in
-                let components = Calendar.current.dateComponents([.hour, .minute], from: newValue)
-                notificationPreferences.reminderHour = components.hour ?? notificationPreferences.reminderHour
-                notificationPreferences.reminderMinute = components.minute ?? notificationPreferences.reminderMinute
-            }
-        )
     }
 
     private func navigate(to page: HomePage) {
@@ -1577,6 +1637,11 @@ struct DashboardView: View {
 
     private func enterGameMode() {
         guard activePage == .home, !isGameMode, !isLaunchingGame else { return }
+        guard selectedSpriteCanBeUsed else {
+            callFailureMessage = "Assign this Tamagotchi to a contact in Settings before playing."
+            navigate(to: .settings)
+            return
+        }
         guard !isHibernating else {
             callFailureMessage = "Your Tamagotchi is hibernating. Feed it from the shop to wake it up before playing."
             return
@@ -1641,6 +1706,9 @@ private struct PendingCallSession: Codable, Identifiable {
     let startedAt: Date
     let fallbackMinutes: Int
     var didLeaveApp: Bool
+    var didObserveOutgoingCall: Bool
+    var callStartedAt: Date?
+    var callEndedAt: Date?
     var promptMinutes: Int?
 
     init(
@@ -1650,6 +1718,9 @@ private struct PendingCallSession: Codable, Identifiable {
         startedAt: Date,
         fallbackMinutes: Int,
         didLeaveApp: Bool = false,
+        didObserveOutgoingCall: Bool = false,
+        callStartedAt: Date? = nil,
+        callEndedAt: Date? = nil,
         promptMinutes: Int? = nil
     ) {
         self.id = id
@@ -1658,6 +1729,9 @@ private struct PendingCallSession: Codable, Identifiable {
         self.startedAt = startedAt
         self.fallbackMinutes = fallbackMinutes
         self.didLeaveApp = didLeaveApp
+        self.didObserveOutgoingCall = didObserveOutgoingCall
+        self.callStartedAt = callStartedAt
+        self.callEndedAt = callEndedAt
         self.promptMinutes = promptMinutes
     }
 
@@ -1678,6 +1752,9 @@ private struct PendingCallSession: Codable, Identifiable {
         case startedAt
         case fallbackMinutes
         case didLeaveApp
+        case didObserveOutgoingCall
+        case callStartedAt
+        case callEndedAt
         case promptMinutes
     }
 
@@ -1689,7 +1766,70 @@ private struct PendingCallSession: Codable, Identifiable {
         startedAt = try container.decode(Date.self, forKey: .startedAt)
         fallbackMinutes = try container.decode(Int.self, forKey: .fallbackMinutes)
         didLeaveApp = try container.decodeIfPresent(Bool.self, forKey: .didLeaveApp) ?? false
+        didObserveOutgoingCall = try container.decodeIfPresent(Bool.self, forKey: .didObserveOutgoingCall) ?? false
+        callStartedAt = try container.decodeIfPresent(Date.self, forKey: .callStartedAt)
+        callEndedAt = try container.decodeIfPresent(Date.self, forKey: .callEndedAt)
         promptMinutes = try container.decodeIfPresent(Int.self, forKey: .promptMinutes)
+    }
+}
+
+private struct CallReminderDraft {
+    var contactID: UUID?
+    var frequency: CallReminderFrequency = .daily
+    var time: Date = Date()
+    var weekday: Int = Calendar.current.component(.weekday, from: Date())
+
+    func makeReminder(calendar: Calendar = .current) -> CallReminder? {
+        guard let contactID else { return nil }
+        let components = calendar.dateComponents([.hour, .minute], from: time)
+        return CallReminder(
+            contactID: contactID,
+            frequency: frequency,
+            hour: components.hour ?? 20,
+            minute: components.minute ?? 0,
+            weekday: weekday,
+            isEnabled: true
+        )
+    }
+}
+
+private struct CallActivityEvent: Equatable {
+    enum Kind: Equatable {
+        case outgoing
+        case connected
+        case ended
+    }
+
+    let id = UUID()
+    let kind: Kind
+    let occurredAt: Date
+}
+
+private final class CallActivityObserver: NSObject, ObservableObject, CXCallObserverDelegate {
+    @Published private(set) var latestEvent: CallActivityEvent?
+
+    private let observer = CXCallObserver()
+    private var observedOutgoingCallIDs: Set<UUID> = []
+
+    override init() {
+        super.init()
+        observer.setDelegate(self, queue: .main)
+    }
+
+    func callObserver(_ callObserver: CXCallObserver, callChanged call: CXCall) {
+        guard call.isOutgoing else { return }
+
+        let now = Date()
+        if call.hasEnded {
+            observedOutgoingCallIDs.remove(call.uuid)
+            latestEvent = CallActivityEvent(kind: .ended, occurredAt: now)
+        } else if call.hasConnected {
+            observedOutgoingCallIDs.insert(call.uuid)
+            latestEvent = CallActivityEvent(kind: .connected, occurredAt: now)
+        } else if !observedOutgoingCallIDs.contains(call.uuid) {
+            observedOutgoingCallIDs.insert(call.uuid)
+            latestEvent = CallActivityEvent(kind: .outgoing, occurredAt: now)
+        }
     }
 }
 
@@ -1899,13 +2039,13 @@ private enum WalkthroughStep: CaseIterable, Identifiable {
     var message: String {
         switch self {
         case .welcome:
-            return "Each Tamagotchi can be linked to a specific contact. Calls with that person keep their paired Tamagotchi healthy."
+            return "Each Tamagotchi must be assigned to a contact before you can select or use it. Calls with that person earn coins for their paired Tamagotchi."
         case .health:
             return "This health bar belongs to the selected Tamagotchi. Calls earn coins, and food from the shop restores health and gives level progress."
         case .logCall:
             return "Use the Log tab to save calls and earn coins. Spend coins on food to heal and level up your Tamagotchi."
         case .contacts:
-            return "Settings lets you import contacts, choose defaults, and assign each Tamagotchi to the person it should represent."
+            return "Settings lets you import contacts, choose defaults, and assign each Tamagotchi to the person it should represent. Locked Tamagotchis unlock as soon as they have an assigned contact."
         case .upgrades:
             return "Upgrades change style and show your streak tier. Streaks rise only when calls are logged on consecutive days."
         case .garden:
@@ -2467,21 +2607,47 @@ private struct QuickActionsFlyout: View {
     }
 }
 
-private struct ReminderTimePickerSheet: View {
-    @Binding var selectedDate: Date
+private struct ReminderEditorSheet: View {
+    let contacts: [AppContact]
+    @Binding var draft: CallReminderDraft
     let onSave: () -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Pick a daily reminder time for your next check-in.")
+                Text("Choose who to call, how often to be reminded, and what time the reminder should arrive.")
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
                     .foregroundStyle(DetailCardPalette.secondaryText)
 
+                Picker("Contact", selection: $draft.contactID) {
+                    ForEach(contacts) { contact in
+                        Text(contact.name).tag(contact.id as UUID?)
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(DetailCardPalette.bodyText)
+
+                Picker("Repeat", selection: $draft.frequency) {
+                    ForEach(CallReminderFrequency.allCases) { frequency in
+                        Text(frequency.label).tag(frequency)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if draft.frequency == .weekly {
+                    Picker("Day", selection: $draft.weekday) {
+                        ForEach(1...7, id: \.self) { weekday in
+                            Text(weekdayName(weekday)).tag(weekday)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .tint(DetailCardPalette.bodyText)
+                }
+
                 DatePicker(
                     "Reminder time",
-                    selection: $selectedDate,
+                    selection: $draft.time,
                     displayedComponents: .hourAndMinute
                 )
                 .datePickerStyle(.wheel)
@@ -2491,7 +2657,7 @@ private struct ReminderTimePickerSheet: View {
                 Spacer(minLength: 0)
             }
             .padding(20)
-            .navigationTitle("Set Reminder")
+            .navigationTitle("Add Reminder")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -2509,11 +2675,16 @@ private struct ReminderTimePickerSheet: View {
                         }
                     }
                     .fontWeight(.bold)
+                    .disabled(draft.contactID == nil)
                 }
             }
         }
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
+    }
+
+    private func weekdayName(_ weekday: Int) -> String {
+        Calendar.current.weekdaySymbols[min(max(weekday, 1), 7) - 1]
     }
 }
 
@@ -2627,6 +2798,7 @@ private struct IntegratedTamagotchiStage: View {
     let isGameMode: Bool
     let hidesSprite: Bool
     let isHibernating: Bool
+    let isContactAssigned: Bool
     let currencyBalance: Int
     let currencyTint: Color
     let streakTier: Int
@@ -2656,18 +2828,24 @@ private struct IntegratedTamagotchiStage: View {
                 .offset(y: 20)
 
             if !isGameMode {
-                HStack {
+                VStack {
                     Spacer(minLength: 0)
 
-                    FoodFeedRail(
-                        currencyBalance: currencyBalance,
-                        currencyTint: currencyTint,
-                        streakTier: streakTier,
-                        onBuyFood: onBuyFood
-                    )
-                    .padding(.trailing, 2)
+                    HStack {
+                        Spacer(minLength: 0)
+
+                        FoodFeedRail(
+                            currencyBalance: currencyBalance,
+                            currencyTint: currencyTint,
+                            streakTier: streakTier,
+                            onBuyFood: onBuyFood
+                        )
+                        .padding(.trailing, 2)
+                    }
+
+                    Spacer(minLength: 0)
                 }
-                .offset(y: 18)
+                .offset(y: 34)
 
                 VStack {
                     Spacer()
@@ -2692,7 +2870,17 @@ private struct IntegratedTamagotchiStage: View {
                 }
                 .offset(y: 104)
 
-                if isHibernating {
+                if !isContactAssigned {
+                    VStack {
+                        Spacer()
+
+                        Text("Assign a contact in Settings")
+                            .font(.system(size: 12, weight: .black, design: .rounded))
+                            .foregroundStyle(Color(red: 0.43, green: 0.38, blue: 0.58))
+                    }
+                    .offset(y: 154)
+                    .allowsHitTesting(false)
+                } else if isHibernating {
                     VStack {
                         Spacer()
 
@@ -2773,6 +2961,7 @@ private struct SpriteSelectionGridView: View {
     let selectedSprite: TamagotchiSpriteProfile
     let selectedClothing: ClothingOption
     let selectedDanceSpeed: DanceSpeed
+    let assignedSpriteIDs: Set<String>
     let onSelectSprite: (TamagotchiSpriteProfile) -> Void
     let spriteLevels: [String: SpriteLevel]
 
@@ -2787,24 +2976,47 @@ private struct SpriteSelectionGridView: View {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVGrid(columns: columns, spacing: 12) {
                     ForEach(sprites) { sprite in
+                        let isAssigned = assignedSpriteIDs.contains(sprite.id)
                         Button(action: ButtonClickSound.action { onSelectSprite(sprite) }) {
                             VStack(spacing: 8) {
-                                PixelTamagotchi(
-                                    health: HealthPersistence.defaultHealth,
-                                    sprite: sprite,
-                                    clothing: selectedClothing,
-                                    artSize: 96,
-                                    showsLabels: false,
-                                    showsBadge: false,
-                                    danceSpeed: selectedDanceSpeed,
-                                    level: spriteLevels[sprite.id],
-                                    showLevel: false,
-                                    showsLevelProgress: false
-                                )
+                                ZStack {
+                                    PixelTamagotchi(
+                                        health: HealthPersistence.defaultHealth,
+                                        sprite: sprite,
+                                        clothing: selectedClothing,
+                                        artSize: 96,
+                                        showsLabels: false,
+                                        showsBadge: false,
+                                        danceSpeed: selectedDanceSpeed,
+                                        level: spriteLevels[sprite.id],
+                                        showLevel: false,
+                                        showsLevelProgress: false
+                                    )
+                                    .opacity(isAssigned ? 1 : 0.34)
+
+                                    if !isAssigned {
+                                        Circle()
+                                            .fill(Color.black.opacity(0.72))
+                                            .frame(width: 38, height: 38)
+                                            .overlay {
+                                                Image(systemName: "lock.fill")
+                                                    .font(.system(size: 16, weight: .black))
+                                                    .foregroundStyle(.white)
+                                            }
+                                    }
+                                }
+
                                 Text(sprite.displayName)
                                     .font(.system(size: 13, weight: .bold, design: .rounded))
                                     .foregroundStyle(Color(red: 0.09, green: 0.16, blue: 0.26))
                                     .lineLimit(1)
+
+                                if !isAssigned {
+                                    Text("Assign contact")
+                                        .font(.system(size: 11, weight: .black, design: .rounded))
+                                        .foregroundStyle(Color(red: 0.88, green: 0.26, blue: 0.32))
+                                        .lineLimit(1)
+                                }
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
@@ -2818,6 +3030,7 @@ private struct SpriteSelectionGridView: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .disabled(!isAssigned)
                     }
                 }
                 .padding(.bottom, 8)
@@ -2931,19 +3144,11 @@ private struct PixelGardenPlaygroundView: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
             .onAppear {
-                if pets.isEmpty || pets.map(\.sprite.id) != sprites.map(\.id) {
-                    let initialSprites = sprites.isEmpty ? [TamagotchiSpriteCatalog.defaultSprite] : sprites
-                    pets = initialSprites.enumerated().map { index, sprite in
-                        let shelf = index % shelfYs.count
-                        return GardenPet(
-                            sprite: sprite,
-                            position: CGPoint(x: CGFloat.random(in: 70...(max(80, size.width - 70))), y: shelfYs[shelf] - 36),
-                            velocity: CGSize(width: CGFloat.random(in: -20...20), height: 0),
-                            shelfIndex: shelf
-                        )
-                    }
-                }
+                refreshPetsIfNeeded(shelfYs: shelfYs, size: size)
                 lastTick = Date()
+            }
+            .onChange(of: sprites.map(\.id)) { _, _ in
+                refreshPetsIfNeeded(shelfYs: shelfYs, size: size)
             }
             .onReceive(tickTimer) { now in
                 let dt = min(max(now.timeIntervalSince(lastTick), 0), 1.0 / 20.0)
@@ -2981,6 +3186,19 @@ private struct PixelGardenPlaygroundView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func refreshPetsIfNeeded(shelfYs: [CGFloat], size: CGSize) {
+        guard pets.map(\.sprite.id) != sprites.map(\.id) else { return }
+        pets = sprites.enumerated().map { index, sprite in
+            let shelf = index % shelfYs.count
+            return GardenPet(
+                sprite: sprite,
+                position: CGPoint(x: CGFloat.random(in: 70...(max(80, size.width - 70))), y: shelfYs[shelf] - 36),
+                velocity: CGSize(width: CGFloat.random(in: -20...20), height: 0),
+                shelfIndex: shelf
+            )
         }
     }
 }
@@ -3875,7 +4093,6 @@ private struct LogPageCard: View {
     let assignedContact: AppContact?
     let selectedSpriteName: String
     @Binding var minutes: String
-    let defaultCallMinutes: Int
     let entries: [CallLogEntry]
     let onSubmit: () -> Void
     let onSelectRecent: (CallLogEntry) -> Void
@@ -3948,7 +4165,7 @@ private struct LogPageCard: View {
 
                     LogInputField(
                         title: "Minutes",
-                        placeholder: String(defaultCallMinutes),
+                        placeholder: "Ex. 15",
                         text: $minutes,
                         isNumeric: true
                     )
@@ -4216,13 +4433,11 @@ private struct SettingsPageCard: View {
     @Binding var preferredContactID: UUID?
     @Binding var spriteContactAssignments: [String: UUID]
     let sprites: [TamagotchiSpriteProfile]
-    @Binding var pendingContactName: String
     @Binding var notificationPreferences: NotificationPreferences
-    @Binding var reminderTime: Date
-    @Binding var defaultCallMinutes: Int
-    let onAddContact: () -> Void
     let onImportContact: () -> Void
     let onDeleteContact: (AppContact) -> Void
+    let onAddReminder: () -> Void
+    let onDeleteReminder: (CallReminder) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -4236,30 +4451,6 @@ private struct SettingsPageCard: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 SettingsSectionTitle(title: "Contacts")
-
-                HStack(spacing: 10) {
-                    TextField("Add a contact", text: $pendingContactName)
-                        .font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundStyle(DetailCardPalette.bodyText)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(DetailCardPalette.surfaceStrongFill)
-                        )
-
-                    Button(action: ButtonClickSound.action(onAddContact)) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 15, weight: .black))
-                            .foregroundStyle(.white)
-                            .frame(width: 44, height: 44)
-                            .background(
-                                Circle()
-                                    .fill(Color(red: 0.12, green: 0.76, blue: 0.60))
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
 
                 Button(action: ButtonClickSound.action(onImportContact)) {
                     Label("Import from iPhone Contacts", systemImage: "person.crop.circle.badge.plus")
@@ -4275,7 +4466,7 @@ private struct SettingsPageCard: View {
                 .buttonStyle(.plain)
 
                 if contacts.isEmpty {
-                    SettingsHint(text: "Add at least one contact to enable the call log.")
+                    SettingsHint(text: "Import at least one contact to enable the call log.")
                 } else {
                     ForEach(contacts) { contact in
                         ContactSettingsRow(
@@ -4314,20 +4505,7 @@ private struct SettingsPageCard: View {
             }
 
             VStack(alignment: .leading, spacing: 12) {
-                SettingsSectionTitle(title: "Logging Defaults")
-
-                Stepper(value: $defaultCallMinutes, in: 1...240) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Default call length: \(defaultCallMinutes) minute\(defaultCallMinutes == 1 ? "" : "s")")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(DetailCardPalette.bodyText)
-
-                        Text("New log entries start from this value so you can save faster.")
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(DetailCardPalette.mutedText)
-                    }
-                }
-                .tint(DetailCardPalette.bodyText)
+                SettingsSectionTitle(title: "Logging")
 
                 if !contacts.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
@@ -4356,34 +4534,34 @@ private struct SettingsPageCard: View {
             VStack(alignment: .leading, spacing: 12) {
                 SettingsSectionTitle(title: "Notifications")
 
-                SettingsToggleRow(
-                    title: "Daily reminders",
-                    subtitle: "Schedules a local reminder for your default contact.",
-                    isOn: $notificationPreferences.dailyRemindersEnabled
-                )
-
-                if notificationPreferences.dailyRemindersEnabled {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Reminder time")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(DetailCardPalette.bodyText)
-
-                        DatePicker(
-                            "Reminder time",
-                            selection: $reminderTime,
-                            displayedComponents: .hourAndMinute
-                        )
-                        .datePickerStyle(.compact)
-                        .labelsHidden()
-                        .tint(DetailCardPalette.bodyText)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 14)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(DetailCardPalette.surfaceStrongFill)
+                if contacts.isEmpty {
+                    SettingsHint(text: "Add contacts before creating call reminders.")
+                } else {
+                    ForEach(notificationPreferences.callReminders) { reminder in
+                        CallReminderRow(
+                            reminder: reminder,
+                            contact: contacts.first(where: { $0.id == reminder.contactID }),
+                            onToggle: { isEnabled in
+                                if let index = notificationPreferences.callReminders.firstIndex(where: { $0.id == reminder.id }) {
+                                    notificationPreferences.callReminders[index].isEnabled = isEnabled
+                                }
+                            },
+                            onDelete: { onDeleteReminder(reminder) }
                         )
                     }
+
+                    Button(action: ButtonClickSound.action(onAddReminder)) {
+                        Label("Add Reminder", systemImage: "bell.badge.plus")
+                            .font(.system(size: 14, weight: .black, design: .rounded))
+                            .foregroundStyle(DetailCardPalette.bodyText)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .fill(DetailCardPalette.surfaceFill)
+                            )
+                    }
+                    .buttonStyle(.plain)
                 }
 
                 SettingsToggleRow(
@@ -4517,6 +4695,68 @@ private struct ContactAssignmentRow: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(DetailCardPalette.surfaceFill)
         )
+    }
+}
+
+private struct CallReminderRow: View {
+    let reminder: CallReminder
+    let contact: AppContact?
+    let onToggle: (Bool) -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "bell.fill")
+                .font(.system(size: 15, weight: .black))
+                .foregroundStyle(Color(red: 0.95, green: 0.62, blue: 0.20))
+                .frame(width: 34, height: 34)
+                .background(
+                    Circle()
+                        .fill(Color(red: 0.95, green: 0.62, blue: 0.20).opacity(0.16))
+                )
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(contact?.name ?? "Unknown contact")
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(DetailCardPalette.bodyText)
+
+                Text("\(reminder.frequency.label) at \(timeText)")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(DetailCardPalette.mutedText)
+            }
+
+            Spacer(minLength: 0)
+
+            Toggle("", isOn: Binding(
+                get: { reminder.isEnabled },
+                set: onToggle
+            ))
+            .labelsHidden()
+            .tint(Color(red: 0.12, green: 0.76, blue: 0.60))
+
+            Button(role: .destructive, action: ButtonClickSound.action(onDelete)) {
+                Image(systemName: "trash.fill")
+                    .font(.system(size: 13, weight: .black))
+                    .foregroundStyle(Color(red: 0.88, green: 0.24, blue: 0.28))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(DetailCardPalette.surfaceFill)
+        )
+    }
+
+    private var timeText: String {
+        var components = DateComponents()
+        components.weekday = reminder.weekday
+        components.hour = reminder.hour
+        components.minute = reminder.minute
+        let date = Calendar.current.nextDate(after: Date(), matching: components, matchingPolicy: .nextTime) ?? Date()
+        let formatter = DateFormatter()
+        formatter.dateFormat = reminder.frequency == .weekly ? "EEE h:mm a" : "h:mm a"
+        return formatter.string(from: date)
     }
 }
 
@@ -4998,7 +5238,7 @@ private enum FeedingOption: String, CaseIterable, Identifiable {
     case fiveTimes
 
     var id: String { rawValue }
-    private var unitCost: Int { 12 }
+    private var unitCost: Int { 10 }
     private var unitHealthRestored: Double { 18 }
     private var unitExperienceGain: Int { 24 }
 
