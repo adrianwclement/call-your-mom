@@ -111,6 +111,174 @@ private extension Data {
     }
 }
 
+private enum AppSoundEffect: String, CaseIterable {
+    case levelUp
+    case flappyFlap
+}
+
+private enum SoundEffectPlayer {
+    private static let fileExtensions = ["wav", "mp3", "m4a", "caf", "aiff"]
+    private static let defaultsKey = "soundEffects.fileMap"
+    private static let bundledSFXSubdirectory = "SFX"
+    private static var players: [String: AVAudioPlayer] = [:]
+    private static var fallbackURLs: [String: URL] = [:]
+
+    // Default sound file names (without extension).
+    // Replace these files in the app bundle, or override via setFilename(_:for:).
+    private static let defaultFileMap: [AppSoundEffect: String] = [
+        .levelUp: "sfx_level_up",
+        .flappyFlap: "sfx_flappy_flap"
+    ]
+
+    static func play(_ effect: AppSoundEffect) {
+        guard let filename = filename(for: effect) else { return }
+        guard let player = player(forFilename: filename) else { return }
+        player.currentTime = 0
+        player.play()
+    }
+
+    static func setFilename(_ filename: String, for effect: AppSoundEffect) {
+        var map = persistedFileMap()
+        map[effect.rawValue] = filename
+        UserDefaults.standard.set(map, forKey: defaultsKey)
+        players[filename] = nil
+    }
+
+    private static func filename(for effect: AppSoundEffect) -> String? {
+        let overrides = persistedFileMap()
+        if let override = overrides[effect.rawValue], !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return override
+        }
+        return defaultFileMap[effect]
+    }
+
+    private static func persistedFileMap() -> [String: String] {
+        (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String]) ?? [:]
+    }
+
+    private static func player(forFilename filename: String) -> AVAudioPlayer? {
+        if let cached = players[filename] {
+            return cached
+        }
+
+        let url = resolveBundleURL(filename: filename) ?? fallbackURL(for: filename)
+        guard let url else { return nil }
+        guard let player = try? AVAudioPlayer(contentsOf: url) else { return nil }
+        player.prepareToPlay()
+        players[filename] = player
+        return player
+    }
+
+    private static func resolveBundleURL(filename: String) -> URL? {
+        let baseName = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+
+        for ext in fileExtensions {
+            if let url = Bundle.main.url(forResource: baseName, withExtension: ext, subdirectory: bundledSFXSubdirectory) {
+                return url
+            }
+            if let url = Bundle.main.url(forResource: baseName, withExtension: ext) {
+                return url
+            }
+        }
+
+        let providedExtension = URL(fileURLWithPath: filename).pathExtension
+        if !providedExtension.isEmpty {
+            if let url = Bundle.main.url(forResource: baseName, withExtension: providedExtension, subdirectory: bundledSFXSubdirectory) {
+                return url
+            }
+            if let url = Bundle.main.url(forResource: baseName, withExtension: providedExtension) {
+                return url
+            }
+        }
+
+        return nil
+    }
+
+    private static func fallbackURL(for filename: String) -> URL? {
+        if let existing = fallbackURLs[filename] {
+            return existing
+        }
+
+        let waveform: Data
+        let levelUpName = defaultFileMap[.levelUp] ?? "sfx_level_up"
+        let flapName = defaultFileMap[.flappyFlap] ?? "sfx_flappy_flap"
+        switch filename {
+        case levelUpName:
+            waveform = makeLevelUpData()
+        case flapName:
+            waveform = makeFlapData()
+        default:
+            return nil
+        }
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(filename).wav")
+        try? waveform.write(to: tempURL, options: .atomic)
+        fallbackURLs[filename] = tempURL
+        return tempURL
+    }
+
+    private static func makeFlapData() -> Data {
+        makeWAVData(
+            duration: 0.06,
+            sampleRate: 44_100
+        ) { time in
+            let env = exp(-55 * time)
+            let tone = sin(2 * Double.pi * 520 * time)
+            let edge = sin(2 * Double.pi * 980 * time) * 0.28
+            return (tone + edge) * env * 0.45
+        }
+    }
+
+    private static func makeLevelUpData() -> Data {
+        makeWAVData(
+            duration: 0.28,
+            sampleRate: 44_100
+        ) { time in
+            let env = exp(-6.2 * time)
+            let glide = 420 + (time * 560)
+            let lead = sin(2 * Double.pi * glide * time)
+            let harmony = sin(2 * Double.pi * (glide * 1.5) * time) * 0.25
+            return (lead + harmony) * env * 0.42
+        }
+    }
+
+    private static func makeWAVData(duration: Double, sampleRate: Int, sample: (Double) -> Double) -> Data {
+        let channelCount = 1
+        let bitsPerSample = 16
+        let sampleCount = Int(Double(sampleRate) * duration)
+        var pcmData = Data()
+
+        for index in 0..<sampleCount {
+            let time = Double(index) / Double(sampleRate)
+            let clamped = max(-1, min(1, sample(time)))
+            var intSample = Int16(clamped * Double(Int16.max)).littleEndian
+            Swift.withUnsafeBytes(of: &intSample) {
+                pcmData.append(contentsOf: $0)
+            }
+        }
+
+        let byteRate = sampleRate * channelCount * bitsPerSample / 8
+        let blockAlign = channelCount * bitsPerSample / 8
+        var data = Data()
+        data.append("RIFF".data(using: .ascii)!)
+        data.appendLittleEndian(UInt32(36 + pcmData.count))
+        data.append("WAVE".data(using: .ascii)!)
+        data.append("fmt ".data(using: .ascii)!)
+        data.appendLittleEndian(UInt32(16))
+        data.appendLittleEndian(UInt16(1))
+        data.appendLittleEndian(UInt16(channelCount))
+        data.appendLittleEndian(UInt32(sampleRate))
+        data.appendLittleEndian(UInt32(byteRate))
+        data.appendLittleEndian(UInt16(blockAlign))
+        data.appendLittleEndian(UInt16(bitsPerSample))
+        data.append("data".data(using: .ascii)!)
+        data.appendLittleEndian(UInt32(pcmData.count))
+        data.append(pcmData)
+        return data
+    }
+}
+
 struct DashboardView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
@@ -208,6 +376,7 @@ struct DashboardView: View {
         lastLevelUpValue = level
         levelUpNotificationSequence += 1
         let notificationSequence = levelUpNotificationSequence
+        SoundEffectPlayer.play(.levelUp)
 
         withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
             showLevelUpNotification = true
@@ -3573,6 +3742,7 @@ private struct FlappyTamagotchiGameView: View {
             lastTick = Date()
         }
 
+        SoundEffectPlayer.play(.flappyFlap)
         birdVelocity = -285
     }
 
