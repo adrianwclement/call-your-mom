@@ -2999,14 +2999,10 @@ private struct IntegratedTamagotchiStage: View {
                     labelOffsetY: -10,
                     isSleeping: isHibernating
                 )
-                .offset(y: 28)
+                .offset(y: -4)
             }
 
-            Ellipse()
-                .fill(Color.black.opacity(0.10))
-                .frame(width: 120, height: 20)
-                .blur(radius: 4)
-                .offset(y: 20)
+            EmptyView()
 
             if !isGameMode {
                 VStack {
@@ -3049,7 +3045,7 @@ private struct IntegratedTamagotchiStage: View {
                     }
                     .buttonStyle(.plain)
                 }
-                .offset(y: 80)
+                .offset(y: 74)
 
                 if !isContactAssigned {
                     VStack {
@@ -3059,7 +3055,7 @@ private struct IntegratedTamagotchiStage: View {
                             .font(.system(size: 12, weight: .black, design: .rounded))
                             .foregroundStyle(Color(red: 0.43, green: 0.38, blue: 0.58))
                     }
-                    .offset(y: 130)
+                    .offset(y: 124)
                     .allowsHitTesting(false)
                 } else if isHibernating {
                     VStack {
@@ -3069,7 +3065,7 @@ private struct IntegratedTamagotchiStage: View {
                             .font(.system(size: 12, weight: .black, design: .rounded))
                             .foregroundStyle(Color(red: 0.43, green: 0.38, blue: 0.58))
                     }
-                    .offset(y: 130)
+                    .offset(y: 124)
                     .allowsHitTesting(false)
                 }
             }
