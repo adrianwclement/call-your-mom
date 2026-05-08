@@ -138,6 +138,7 @@ struct AppSettings: Codable, Equatable {
     var spriteContactAssignments: [String: UUID]
     var defaultCallMinutes: Int
     var notificationPreferences: NotificationPreferences
+    var selectedThemeID: String
 
     private enum CodingKeys: String, CodingKey {
         case contacts
@@ -145,6 +146,7 @@ struct AppSettings: Codable, Equatable {
         case spriteContactAssignments
         case defaultCallMinutes
         case notificationPreferences
+        case selectedThemeID
     }
 
     init(
@@ -152,13 +154,15 @@ struct AppSettings: Codable, Equatable {
         preferredContactID: UUID?,
         spriteContactAssignments: [String: UUID] = [:],
         defaultCallMinutes: Int,
-        notificationPreferences: NotificationPreferences
+        notificationPreferences: NotificationPreferences,
+        selectedThemeID: String = "meadow"
     ) {
         self.contacts = contacts
         self.preferredContactID = preferredContactID
         self.spriteContactAssignments = spriteContactAssignments
         self.defaultCallMinutes = defaultCallMinutes
         self.notificationPreferences = notificationPreferences
+        self.selectedThemeID = selectedThemeID
     }
 
     init(from decoder: Decoder) throws {
@@ -168,6 +172,7 @@ struct AppSettings: Codable, Equatable {
         spriteContactAssignments = try container.decodeIfPresent([String: UUID].self, forKey: .spriteContactAssignments) ?? [:]
         defaultCallMinutes = try container.decodeIfPresent(Int.self, forKey: .defaultCallMinutes) ?? 0
         notificationPreferences = try container.decodeIfPresent(NotificationPreferences.self, forKey: .notificationPreferences) ?? NotificationPreferences()
+        selectedThemeID = try container.decodeIfPresent(String.self, forKey: .selectedThemeID) ?? "meadow"
     }
 }
 
@@ -181,7 +186,8 @@ enum SettingsPersistence {
         preferredContactID: nil,
         spriteContactAssignments: [:],
         defaultCallMinutes: 0,
-        notificationPreferences: NotificationPreferences()
+        notificationPreferences: NotificationPreferences(),
+        selectedThemeID: "meadow"
     )
 
     static func load() -> AppSettings {
@@ -224,7 +230,8 @@ enum SettingsPersistence {
                 streakAlertsEnabled: decoded.notificationPreferences.streakAlertsEnabled,
                 messageAlertsEnabled: decoded.notificationPreferences.messageAlertsEnabled,
                 weeklySummaryEnabled: decoded.notificationPreferences.weeklySummaryEnabled
-            )
+            ),
+            selectedThemeID: decoded.selectedThemeID
         )
     }
 
@@ -247,7 +254,8 @@ enum SettingsPersistence {
             preferredContactID: settings.preferredContactID,
             spriteContactAssignments: migratedSpriteContactAssignments(settings.spriteContactAssignments),
             defaultCallMinutes: settings.defaultCallMinutes,
-            notificationPreferences: notificationPreferences
+            notificationPreferences: notificationPreferences,
+            selectedThemeID: settings.selectedThemeID
         )
         guard let encoded = try? JSONEncoder().encode(sanitizedSettings) else { return }
         defaults.set(encoded, forKey: storageKey)

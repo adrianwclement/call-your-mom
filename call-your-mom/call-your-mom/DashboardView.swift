@@ -394,6 +394,9 @@ struct DashboardView: View {
                 persistSettings()
                 syncNotificationSchedules()
             }
+            .onChange(of: selectedTheme) { _, _ in
+                persistSettings()
+            }
             .onChange(of: activePage) { _, newValue in
                 presentDefaultContactPromptIfNeeded(for: newValue)
             }
@@ -1327,6 +1330,7 @@ struct DashboardView: View {
         spriteContactAssignments = settings.spriteContactAssignments
         defaultCallMinutes = settings.defaultCallMinutes
         notificationPreferences = settings.notificationPreferences
+        selectedTheme = AppTheme(rawValue: settings.selectedThemeID) ?? .meadow
         selectedLogContactID = spriteContactAssignments[selectedSprite.id] ?? settings.preferredContactID ?? settings.contacts.first?.id
 
         logMinutes = logMinutes.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1349,7 +1353,8 @@ struct DashboardView: View {
                 preferredContactID: preferredContactID,
                 spriteContactAssignments: spriteContactAssignments,
                 defaultCallMinutes: defaultCallMinutes,
-                notificationPreferences: notificationPreferences
+                notificationPreferences: notificationPreferences,
+                selectedThemeID: selectedTheme.rawValue
             )
         )
     }
