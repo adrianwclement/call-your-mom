@@ -19,79 +19,20 @@ enum ButtonClickSound {
         return generator
     }()
 
-    private static let player: AVAudioPlayer? = {
-        let fileURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("call-your-mom-low-button-click-v2.wav")
-
-        if !FileManager.default.fileExists(atPath: fileURL.path) {
-            try? makeClickData().write(to: fileURL, options: .atomic)
-        }
-
-        let player = try? AVAudioPlayer(contentsOf: fileURL)
-        player?.volume = 1.0
-        player?.prepareToPlay()
-        return player
-    }()
-
     static func play() {
-        player?.currentTime = 0
-        player?.play()
+        // Click sounds intentionally disabled; keep haptics only.
     }
 
     static func perform(_ action: () -> Void) {
         hapticGenerator.impactOccurred(intensity: 0.7)
         hapticGenerator.prepare()
         action()
-        DispatchQueue.main.async {
-            play()
-        }
     }
 
     static func action(_ action: @escaping () -> Void) -> () -> Void {
         {
             perform(action)
         }
-    }
-
-    private static func makeClickData() -> Data {
-        let sampleRate = 44_100
-        let channelCount = 1
-        let bitsPerSample = 16
-        let duration = 0.045
-        let sampleCount = Int(Double(sampleRate) * duration)
-        var pcmData = Data()
-
-        for index in 0..<sampleCount {
-            let time = Double(index) / Double(sampleRate)
-            let fade = exp(-78 * time)
-            let lowTone = sin(2 * Double.pi * 185 * time)
-            let warmEdge = sin(2 * Double.pi * 370 * time) * 0.28
-            let sample = (lowTone + warmEdge) * fade * 0.55
-            let clampedSample = max(-1, min(1, sample))
-            var intSample = Int16(clampedSample * Double(Int16.max)).littleEndian
-            Swift.withUnsafeBytes(of: &intSample) {
-                pcmData.append(contentsOf: $0)
-            }
-        }
-
-        let byteRate = sampleRate * channelCount * bitsPerSample / 8
-        let blockAlign = channelCount * bitsPerSample / 8
-        var data = Data()
-        data.append("RIFF".data(using: .ascii)!)
-        data.appendLittleEndian(UInt32(36 + pcmData.count))
-        data.append("WAVE".data(using: .ascii)!)
-        data.append("fmt ".data(using: .ascii)!)
-        data.appendLittleEndian(UInt32(16))
-        data.appendLittleEndian(UInt16(1))
-        data.appendLittleEndian(UInt16(channelCount))
-        data.appendLittleEndian(UInt32(sampleRate))
-        data.appendLittleEndian(UInt32(byteRate))
-        data.appendLittleEndian(UInt16(blockAlign))
-        data.appendLittleEndian(UInt16(bitsPerSample))
-        data.append("data".data(using: .ascii)!)
-        data.appendLittleEndian(UInt32(pcmData.count))
-        data.append(pcmData)
-        return data
     }
 }
 
@@ -131,6 +72,9 @@ private enum SoundEffectPlayer {
     ]
 
     static func play(_ effect: AppSoundEffect) {
+        if effect == .flappyFlap {
+            return
+        }
         guard let filename = filename(for: effect) else { return }
         guard let player = player(forFilename: filename) else { return }
         player.currentTime = 0
@@ -318,6 +262,9 @@ struct DashboardView: View {
     @State private var reminderDraft = CallReminderDraft()
     @State private var isDefaultContactPickerPresented = false
     @State private var selectedDefaultContactDraftID: UUID?
+    @State private var isSpriteContactAssignmentPresented = false
+    @State private var pendingSpriteAssignmentSpriteID: String?
+    @State private var selectedSpriteAssignmentContactID: UUID?
     @State private var isDefaultContactPromptPresented = false
     @State private var isWalkthroughPresented = false
     @State private var walkthroughIndex = 0
@@ -335,6 +282,8 @@ struct DashboardView: View {
     @State private var lastLevelUpValue = 1
     @State private var levelUpNotificationSequence = 0
     @State private var isKeyboardVisible = false
+    @State private var isShowingLaunchSplash = true
+    @State private var hasCompletedInitialLoad = false
     private let decayTimer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private let minimumCallPromptDelay: TimeInterval = 20
     private let stalePendingCallInterval: TimeInterval = 30 * 60
@@ -472,6 +421,14 @@ struct DashboardView: View {
                     contacts: contacts,
                     selectedContactID: $selectedDefaultContactDraftID,
                     onSave: applyDefaultContactDraft
+                )
+            }
+            .sheet(isPresented: $isSpriteContactAssignmentPresented) {
+                SpriteContactAssignmentSheet(
+                    spriteName: pendingSpriteAssignmentSpriteName,
+                    contacts: contacts,
+                    selectedContactID: $selectedSpriteAssignmentContactID,
+                    onSave: applySpriteContactAssignmentDraft
                 )
             }
     }
@@ -618,7 +575,29 @@ struct DashboardView: View {
         }
     }
 
+    private var pendingSpriteAssignmentSpriteName: String {
+        guard
+            let spriteID = pendingSpriteAssignmentSpriteID,
+            let sprite = availableSprites.first(where: { $0.id == spriteID })
+        else {
+            return "this sprite"
+        }
+        return sprite.displayName
+    }
+
+    private func promptAssignContactForLockedSprite(_ sprite: TamagotchiSpriteProfile) {
+        guard !contacts.isEmpty else {
+            isContactPickerPresented = true
+            return
+        }
+
+        pendingSpriteAssignmentSpriteID = sprite.id
+        selectedSpriteAssignmentContactID = spriteContactAssignments[sprite.id] ?? preferredContactID ?? contacts.first?.id
+        isSpriteContactAssignmentPresented = true
+    }
+
     private func handleAppear() {
+        guard !hasCompletedInitialLoad else { return }
         withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
             healthPulse = true
         }
@@ -636,6 +615,10 @@ struct DashboardView: View {
         syncNotificationSchedules()
         presentPostCallPromptIfReady()
         startWalkthroughIfNeeded()
+        hasCompletedInitialLoad = true
+        withAnimation(.easeOut(duration: 0.14)) {
+            isShowingLaunchSplash = false
+        }
     }
 
     private func handleKeyboardDismissDrag(_ value: DragGesture.Value) {
@@ -673,6 +656,8 @@ struct DashboardView: View {
             walkthroughOverlay(metrics: metrics, showingGame: showingGame)
 
             levelUpToast(metrics: metrics, showingGame: showingGame)
+
+            launchSplashOverlay
         }
         .overlay(alignment: .bottom) {
             actionDockOverlay(metrics: metrics, showingGame: showingGame)
@@ -683,6 +668,25 @@ struct DashboardView: View {
             DragGesture(minimumDistance: 24)
                 .onEnded(handleKeyboardDismissDrag)
         )
+    }
+
+    @ViewBuilder
+    private var launchSplashOverlay: some View {
+        if isShowingLaunchSplash {
+            ZStack {
+                Color.white
+                    .ignoresSafeArea()
+
+                Image("LaunchSplashSlime")
+                    .resizable()
+                    .interpolation(.none)
+                    .scaledToFit()
+                    .frame(width: 180, height: 180)
+            }
+            .transition(.opacity)
+            .zIndex(100)
+            .allowsHitTesting(false)
+        }
     }
 
     @ViewBuilder
@@ -839,6 +843,7 @@ struct DashboardView: View {
                         selectedDanceSpeed: selectedDanceSpeed,
                         assignedSpriteIDs: assignedSpriteIDs,
                         onSelectSprite: selectSprite,
+                        onLockedSpriteTap: promptAssignContactForLockedSprite,
                         spriteLevels: spriteLevels
                     )
                     .padding(.horizontal, metrics.horizontalPadding)
@@ -1205,8 +1210,6 @@ struct DashboardView: View {
                     LogPageCard(
                         contacts: contacts,
                         selectedContactID: $selectedLogContactID,
-                        assignedContact: currentAssignedContact,
-                        selectedSpriteName: selectedSprite.displayName,
                         minutes: $logMinutes,
                         entries: callLogs,
                         onSubmit: submitLogEntry,
@@ -1512,6 +1515,24 @@ struct DashboardView: View {
         preferredContactID = selectedDefaultContactDraftID ?? contacts.first?.id
         selectedLogContactID = preferredContactID
         isDefaultContactPickerPresented = false
+    }
+
+    private func applySpriteContactAssignmentDraft() {
+        guard
+            let spriteID = pendingSpriteAssignmentSpriteID,
+            let contactID = selectedSpriteAssignmentContactID
+        else {
+            isSpriteContactAssignmentPresented = false
+            return
+        }
+
+        spriteContactAssignments[spriteID] = contactID
+        if let sprite = availableSprites.first(where: { $0.id == spriteID }) {
+            selectSprite(sprite)
+        }
+
+        isSpriteContactAssignmentPresented = false
+        pendingSpriteAssignmentSpriteID = nil
     }
 
     private func presentPostCallPromptIfReady() {
@@ -2918,6 +2939,57 @@ private struct DefaultContactPickerSheet: View {
     }
 }
 
+private struct SpriteContactAssignmentSheet: View {
+    let spriteName: String
+    let contacts: [AppContact]
+    @Binding var selectedContactID: UUID?
+    let onSave: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Assign a contact to unlock \(spriteName).")
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    .foregroundStyle(DetailCardPalette.secondaryText)
+
+                Picker("Assign contact", selection: $selectedContactID) {
+                    ForEach(contacts) { contact in
+                        Text(contact.name).tag(contact.id as UUID?)
+                    }
+                }
+                .pickerStyle(.wheel)
+
+                Spacer(minLength: 0)
+            }
+            .padding(20)
+            .navigationTitle("Assign Contact")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        ButtonClickSound.perform {
+                            dismiss()
+                        }
+                    }
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        ButtonClickSound.perform {
+                            onSave()
+                        }
+                    }
+                    .fontWeight(.bold)
+                    .disabled(selectedContactID == nil)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+        .presentationDragIndicator(.visible)
+    }
+}
+
 private struct ExpandableActionRow: View {
     let icon: String
     let title: String
@@ -3140,6 +3212,7 @@ private struct SpriteSelectionGridView: View {
     let selectedDanceSpeed: DanceSpeed
     let assignedSpriteIDs: Set<String>
     let onSelectSprite: (TamagotchiSpriteProfile) -> Void
+    let onLockedSpriteTap: (TamagotchiSpriteProfile) -> Void
     let spriteLevels: [String: SpriteLevel]
 
     private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
@@ -3154,7 +3227,15 @@ private struct SpriteSelectionGridView: View {
                 LazyVGrid(columns: columns, spacing: 12) {
                     ForEach(sprites) { sprite in
                         let isAssigned = assignedSpriteIDs.contains(sprite.id)
-                        Button(action: ButtonClickSound.action { onSelectSprite(sprite) }) {
+                        Button(
+                            action: ButtonClickSound.action {
+                                if isAssigned {
+                                    onSelectSprite(sprite)
+                                } else {
+                                    onLockedSpriteTap(sprite)
+                                }
+                            }
+                        ) {
                             VStack(spacing: 8) {
                                 ZStack {
                                     PixelTamagotchi(
@@ -3207,7 +3288,6 @@ private struct SpriteSelectionGridView: View {
                             )
                         }
                         .buttonStyle(.plain)
-                        .disabled(!isAssigned)
                     }
                 }
                 .padding(.bottom, 8)
@@ -3458,25 +3538,33 @@ private struct PixelGardenPlaygroundView: View {
 
                     pets[index].wanderTimer -= dt
                     if pets[index].wanderTimer <= 0 {
-                        pets[index].wanderTimer = Double.random(in: 0.8...2.1)
+                        pets[index].wanderTimer = Double.random(in: 0.35...1.95)
                         pets[index].wanderHeading = CGSize(
                             width: CGFloat.random(in: -1...1),
                             height: CGFloat.random(in: -1...1)
                         )
+                        if Double.random(in: 0...1) < 0.16 {
+                            pets[index].velocity.width += CGFloat.random(in: -0.95...0.95)
+                            pets[index].velocity.height += CGFloat.random(in: -0.95...0.95)
+                        }
                     }
 
-                    let wanderAcceleration: CGFloat = 0.95
-                    pets[index].velocity.width += pets[index].wanderHeading.width * wanderAcceleration * CGFloat(dt)
-                    pets[index].velocity.height += pets[index].wanderHeading.height * wanderAcceleration * CGFloat(dt)
+                    let headingJitter = CGSize(
+                        width: CGFloat.random(in: -0.5...0.5),
+                        height: CGFloat.random(in: -0.5...0.5)
+                    )
+                    let wanderAcceleration: CGFloat = 1.2
+                    pets[index].velocity.width += (pets[index].wanderHeading.width + headingJitter.width * 0.35) * wanderAcceleration * CGFloat(dt)
+                    pets[index].velocity.height += (pets[index].wanderHeading.height + headingJitter.height * 0.35) * wanderAcceleration * CGFloat(dt)
 
-                    let maxSpeed: CGFloat = 2.6
+                    let maxSpeed: CGFloat = 3.1
                     pets[index].velocity.width = max(-maxSpeed, min(maxSpeed, pets[index].velocity.width))
                     pets[index].velocity.height = max(-maxSpeed, min(maxSpeed, pets[index].velocity.height))
 
                     pets[index].worldPosition.x += pets[index].velocity.width * CGFloat(dt)
                     pets[index].worldPosition.y += pets[index].velocity.height * CGFloat(dt)
 
-                    let damping: CGFloat = 0.986
+                    let damping: CGFloat = Double.random(in: 0...1) < 0.08 ? 0.965 : 0.982
                     pets[index].velocity.width *= damping
                     pets[index].velocity.height *= damping
                     if abs(pets[index].velocity.width) > 0.08 {
@@ -4416,10 +4504,6 @@ private struct DetailPageCard: View {
                 .font(.system(size: 30, weight: .black, design: .rounded))
                 .foregroundStyle(DetailCardPalette.primaryText)
 
-            Text(page.description)
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(DetailCardPalette.secondaryText)
-
             if page == .upgrades {
                 upgradesSection
             } else {
@@ -4446,37 +4530,6 @@ private struct DetailPageCard: View {
 
     private var upgradesSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            /*
-            Text("Clothing")
-                .font(.system(size: 14, weight: .black, design: .rounded))
-                .foregroundStyle(DetailCardPalette.primaryText)
-
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                ForEach(ClothingOption.allCases) { clothing in
-                    Button(action: ButtonClickSound.action { selectedClothing = clothing }) {
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(clothing.color)
-                                .frame(width: 12, height: 12)
-                            Text(clothing.displayName)
-                                .font(.system(size: 13, weight: .bold, design: .rounded))
-                                .foregroundStyle(DetailCardPalette.bodyText)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.7)
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(selectedClothing == clothing ? clothing.color.opacity(0.25) : DetailCardPalette.surfaceFill)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            */
-
             Text("Dance Speed")
                 .font(.system(size: 14, weight: .black, design: .rounded))
                 .foregroundStyle(DetailCardPalette.primaryText)
@@ -4527,10 +4580,6 @@ private struct DetailPageCard: View {
             Text("Current streak: \(streakDays) days")
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color(red: 0.21, green: 0.33, blue: 0.40))
-
-            Text("Keep logging calls daily to raise your streak tier and earn coins for food.")
-                .font(.system(size: 12, weight: .bold, design: .rounded))
-                .foregroundStyle(Color(red: 0.35, green: 0.47, blue: 0.52))
 
             Text("Themes")
                 .font(.system(size: 14, weight: .black, design: .rounded))
@@ -4594,8 +4643,6 @@ private struct CurrencyPill: View {
 private struct LogPageCard: View {
     let contacts: [AppContact]
     @Binding var selectedContactID: UUID?
-    let assignedContact: AppContact?
-    let selectedSpriteName: String
     @Binding var minutes: String
     let entries: [CallLogEntry]
     let onSubmit: () -> Void
@@ -4618,18 +4665,6 @@ private struct LogPageCard: View {
             Text("Log a Call")
                 .font(.system(size: 30, weight: .black, design: .rounded))
                 .foregroundStyle(DetailCardPalette.primaryText)
-
-            Text("Add who you called and how long you talked so the dashboard can track your recent check-ins.")
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(DetailCardPalette.secondaryText)
-
-            if let assignedContact {
-                SettingsHint(text: "\(selectedSpriteName)'s health improves when you log calls with \(assignedContact.name).")
-            } else if !contacts.isEmpty {
-                SettingsHint(text: "Assign \(selectedSpriteName) to a contact in Settings before calls can affect its health.")
-            }
-
-            RecentLogShortcuts(entries: entries, onSelect: onSelectRecent)
 
             if contacts.isEmpty {
                 EmptyLogStateCard(onImportContact: onImportContact, onOpenSettings: onOpenSettings)
@@ -4667,13 +4702,6 @@ private struct LogPageCard: View {
                         }
                     }
 
-                    LogInputField(
-                        title: "Minutes",
-                        placeholder: "Ex. 15",
-                        text: $minutes,
-                        isNumeric: true
-                    )
-
                     Button(action: ButtonClickSound.action(onSubmit)) {
                         HStack {
                             Image(systemName: "phone.badge.plus.fill")
@@ -4691,6 +4719,15 @@ private struct LogPageCard: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(!formIsValid)
+
+                    LogInputField(
+                        title: "Minutes",
+                        placeholder: "Ex. 15",
+                        text: $minutes,
+                        isNumeric: true
+                    )
+
+                    RecentLogShortcuts(entries: entries, onSelect: onSelectRecent)
                 }
             }
 
@@ -4744,7 +4781,7 @@ private struct RecentCallsList: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Recent Calls")
+                Text("Most Recent")
                     .font(.system(size: 18, weight: .black, design: .rounded))
                     .foregroundStyle(DetailCardPalette.primaryText)
 
@@ -4948,10 +4985,6 @@ private struct SettingsPageCard: View {
             Text("Settings")
                 .font(.system(size: 30, weight: .black, design: .rounded))
                 .foregroundStyle(DetailCardPalette.primaryText)
-
-            Text("Manage the people you track, how the app reminds you, and a few defaults that shape the logging flow.")
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(DetailCardPalette.secondaryText)
 
             VStack(alignment: .leading, spacing: 12) {
                 SettingsSectionTitle(title: "Contacts")
