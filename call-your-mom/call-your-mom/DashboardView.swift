@@ -328,6 +328,7 @@ struct DashboardView: View {
     @State private var homeDragTranslation: CGFloat = 0
     @State private var isHomePanelSwipeInProgress = false
     @State private var lastHomePanelSwipeEndedAt = Date.distantPast
+    @State private var isGardenDraggingPet = false
     @State private var spriteLevels: [String: SpriteLevel] = [:]
     @State private var currentSpriteLevel: SpriteLevel = SpriteLevel(spriteID: "default")
     @State private var showLevelUpNotification = false
@@ -894,7 +895,10 @@ struct DashboardView: View {
                         sprites: availableSprites.filter(spriteCanBeUsed),
                         selectedClothing: selectedClothing,
                         isHibernating: isHibernating,
-                        onLaunchGame: enterGameMode
+                        onLaunchGame: enterGameMode,
+                        onDragStateChanged: { isDragging in
+                            isGardenDraggingPet = isDragging
+                        }
                     )
                     .padding(.horizontal, metrics.horizontalPadding)
                     .padding(.bottom, metrics.contentBottomPadding)
@@ -908,6 +912,7 @@ struct DashboardView: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         guard !isShowingGame else { return }
+                        guard !isGardenDraggingPet else { return }
                         guard abs(value.translation.width) >= abs(value.translation.height) else { return }
                         if abs(value.translation.width) > 10 {
                             isHomePanelSwipeInProgress = true
@@ -916,6 +921,11 @@ struct DashboardView: View {
                     }
                     .onEnded { value in
                         guard !isShowingGame else { return }
+                        guard !isGardenDraggingPet else {
+                            homeDragTranslation = 0
+                            isHomePanelSwipeInProgress = false
+                            return
+                        }
                         if abs(value.translation.width) > 10 {
                             lastHomePanelSwipeEndedAt = Date()
                         }
@@ -2479,6 +2489,8 @@ private struct AppSkyBackground: View {
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
+        .scaleEffect(x: 1.04, y: 1.16, anchor: .top)
+        .offset(y: -120)
         .ignoresSafeArea()
     }
 }
@@ -2987,7 +2999,7 @@ private struct IntegratedTamagotchiStage: View {
                     labelOffsetY: -10,
                     isSleeping: isHibernating
                 )
-                .offset(y: 50)
+                .offset(y: 28)
             }
 
             Ellipse()
@@ -3037,7 +3049,7 @@ private struct IntegratedTamagotchiStage: View {
                     }
                     .buttonStyle(.plain)
                 }
-                .offset(y: 104)
+                .offset(y: 80)
 
                 if !isContactAssigned {
                     VStack {
@@ -3047,7 +3059,7 @@ private struct IntegratedTamagotchiStage: View {
                             .font(.system(size: 12, weight: .black, design: .rounded))
                             .foregroundStyle(Color(red: 0.43, green: 0.38, blue: 0.58))
                     }
-                    .offset(y: 154)
+                    .offset(y: 130)
                     .allowsHitTesting(false)
                 } else if isHibernating {
                     VStack {
@@ -3057,7 +3069,7 @@ private struct IntegratedTamagotchiStage: View {
                             .font(.system(size: 12, weight: .black, design: .rounded))
                             .foregroundStyle(Color(red: 0.43, green: 0.38, blue: 0.58))
                     }
-                    .offset(y: 154)
+                    .offset(y: 130)
                     .allowsHitTesting(false)
                 }
             }
@@ -3214,110 +3226,152 @@ private struct PixelGardenPlaygroundView: View {
     let selectedClothing: ClothingOption
     let isHibernating: Bool
     let onLaunchGame: () -> Void
+    let onDragStateChanged: (Bool) -> Void
 
     @State private var pets: [GardenPet] = []
     @State private var lastTick = Date()
+    @State private var activeDragPetID: UUID?
+    @State private var activeDragScreenOffset: CGSize = .zero
     private let tickTimer = Timer.publish(every: 1.0 / 60.0, on: .main, in: .common).autoconnect()
-    private let shelfRatios: [CGFloat] = [0.30, 0.50, 0.70]
+    private let worldBounds = CGSize(width: 10.0, height: 8.0)
+    private let petArtSize: CGFloat = 70
 
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
-            let shelfYs = shelfRatios.map { size.height * $0 }
-            let floorY = size.height * 0.84
+            let iso = isoMetrics(for: size)
 
             ZStack(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .fill(Color.white.opacity(0.42))
+                // Drop your own scene art in Assets as "GardenIsometricBackdrop" to replace this fallback.
+                if UIImage(named: "GardenIsometricBackdrop") != nil {
+                    Image("GardenIsometricBackdrop")
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: size.width, height: size.height)
+                        .clipped()
+                } else {
+                    IsometricGardenFallbackBackground(iso: iso)
+                }
 
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Pixel Garden")
-                            .font(.system(size: 24, weight: .black, design: .rounded))
-                            .foregroundStyle(Color(red: 0.08, green: 0.15, blue: 0.24))
-                        Text("Swipe back to home. Plants coming soon.")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(Color(red: 0.31, green: 0.45, blue: 0.50))
-                    }
-
-                    Spacer(minLength: 8)
-
-                    Button(action: ButtonClickSound.action(onLaunchGame)) {
-                        HStack(spacing: 7) {
-                            Image(systemName: isHibernating ? "moon.zzz.fill" : "play.fill")
-                                .font(.system(size: 12, weight: .black))
-                            Text(isHibernating ? "Asleep" : "Play")
-                                .font(.system(size: 13, weight: .black, design: .rounded))
+                VStack {
+                    HStack {
+                        Spacer(minLength: 0)
+                        Button(action: ButtonClickSound.action(onLaunchGame)) {
+                            HStack(spacing: 7) {
+                                Image(systemName: isHibernating ? "moon.zzz.fill" : "play.fill")
+                                    .font(.system(size: 12, weight: .black))
+                                Text(isHibernating ? "Asleep" : "Play")
+                                    .font(.system(size: 13, weight: .black, design: .rounded))
+                            }
+                            .foregroundStyle(isHibernating ? Color(red: 0.43, green: 0.38, blue: 0.58) : Color(red: 0.08, green: 0.15, blue: 0.24))
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 10)
+                            .background(Capsule(style: .continuous).fill(Color.white.opacity(0.84)))
                         }
-                        .foregroundStyle(isHibernating ? Color(red: 0.43, green: 0.38, blue: 0.58) : Color(red: 0.08, green: 0.15, blue: 0.24))
-                        .padding(.horizontal, 13)
-                        .padding(.vertical, 10)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(Color.white.opacity(0.84))
-                        )
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                    Spacer()
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 16)
 
-                ForEach(Array(shelfYs.enumerated()), id: \.offset) { index, y in
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color(red: 0.56, green: 0.40, blue: 0.25).opacity(0.80))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(Color.white.opacity(0.34), lineWidth: 1)
-                        )
-                        .frame(width: size.width - 28, height: 12)
-                        .position(x: size.width / 2, y: y)
-
-                    if index < shelfYs.count - 1 {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color(red: 0.51, green: 0.36, blue: 0.23).opacity(0.85))
-                            .frame(width: 10, height: shelfYs[index + 1] - y)
-                            .position(x: 24, y: y + ((shelfYs[index + 1] - y) / 2))
-                    }
-                }
-
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(red: 0.45, green: 0.34, blue: 0.22).opacity(0.92))
-                    .frame(width: size.width - 28, height: 16)
-                    .position(x: size.width / 2, y: floorY)
-
-                ForEach($pets) { $pet in
+                ForEach(pets) { pet in
+                    let screenPoint: CGPoint = {
+                        if pet.isAirborne {
+                            return pet.airborneScreenPosition
+                        }
+                        let grounded = project(world: pet.worldPosition, iso: iso)
+                        return CGPoint(x: grounded.x, y: grounded.y - 30)
+                    }()
                     PixelTamagotchi(
                         health: 100,
                         sprite: pet.sprite,
                         clothing: selectedClothing,
-                        artSize: 66,
+                        artSize: petArtSize,
                         showsLabels: false,
-                        showsBadge: false
+                        showsBadge: false,
+                        facingDirection: pet.facingDirection
                     )
-                    .rotationEffect(.degrees(Double(max(-18, min(18, pet.velocity.width * 0.03)))))
-                    .position(pet.position)
+                    .rotationEffect(.degrees(Double(max(-12, min(12, pet.velocity.width * 12)))))
+                    .position(x: screenPoint.x, y: screenPoint.y)
+                    .zIndex(Double(pet.worldPosition.y) + (pet.isHeld ? 100 : 0) + (pet.isAirborne ? 150 : 0))
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { value in
-                                pet.isHeld = true
-                                pet.position = value.location
+                                activeDragPetID = pet.id
+                                guard let activeIndex = pets.firstIndex(where: { $0.id == pet.id }) else { return }
+                                let displayedCenter: CGPoint = {
+                                    if pets[activeIndex].isAirborne {
+                                        return pets[activeIndex].airborneScreenPosition
+                                    }
+                                    let projected = project(world: pets[activeIndex].worldPosition, iso: iso)
+                                    return CGPoint(x: projected.x, y: projected.y - 30)
+                                }()
+                                if !pets[activeIndex].isHeld {
+                                    activeDragScreenOffset = CGSize(
+                                        width: displayedCenter.x - value.location.x,
+                                        height: displayedCenter.y - value.location.y
+                                    )
+                                }
+                                pets[activeIndex].isHeld = true
+                                pets[activeIndex].isAirborne = true
+                                onDragStateChanged(true)
+                                let anchoredDisplayPoint = CGPoint(
+                                    x: value.location.x + activeDragScreenOffset.width,
+                                    y: value.location.y + activeDragScreenOffset.height
+                                )
+                                pets[activeIndex].airborneScreenPosition = anchoredDisplayPoint
+                                pets[activeIndex].airborneVelocity = .zero
+                                if abs(value.translation.width) > 0.5 {
+                                    pets[activeIndex].facingDirection = value.translation.width < 0 ? -1 : 1
+                                }
                             }
                             .onEnded { value in
-                                pet.isHeld = false
-                                let deltaX = value.predictedEndLocation.x - value.location.x
-                                let deltaY = value.predictedEndLocation.y - value.location.y
-                                pet.velocity = CGSize(width: deltaX * 2.4, height: deltaY * 2.4)
+                                guard activeDragPetID == pet.id else { return }
+                                activeDragPetID = nil
+                                guard let activeIndex = pets.firstIndex(where: { $0.id == pet.id }) else { return }
+                                pets[activeIndex].isHeld = false
+                                let anchoredStart = CGPoint(
+                                    x: value.location.x + activeDragScreenOffset.width,
+                                    y: value.location.y + activeDragScreenOffset.height + 30
+                                )
+                                let anchoredEnd = CGPoint(
+                                    x: value.predictedEndLocation.x + activeDragScreenOffset.width,
+                                    y: value.predictedEndLocation.y + activeDragScreenOffset.height + 30
+                                )
+                                let startWorld = unproject(screen: anchoredStart, iso: iso)
+                                let endWorld = unproject(screen: anchoredEnd, iso: iso)
+                                pets[activeIndex].velocity = CGSize(
+                                    width: max(-4.0, min(4.0, (endWorld.x - startWorld.x) * 9.0)),
+                                    height: max(-4.0, min(4.0, (endWorld.y - startWorld.y) * 9.0))
+                                )
+                                pets[activeIndex].isAirborne = true
+                                pets[activeIndex].airborneVelocity = CGSize(
+                                    width: max(-950, min(950, value.predictedEndLocation.x - value.location.x)) * 3.2,
+                                    height: max(-1300, min(1300, value.predictedEndLocation.y - value.location.y)) * 3.2
+                                )
+                                if abs(pets[activeIndex].airborneVelocity.width) > 24 {
+                                    pets[activeIndex].facingDirection = pets[activeIndex].airborneVelocity.width < 0 ? -1 : 1
+                                }
+                                pets[activeIndex].airborneScreenPosition = CGPoint(
+                                    x: value.location.x + activeDragScreenOffset.width,
+                                    y: value.location.y + activeDragScreenOffset.height
+                                )
+                                pets[activeIndex].wanderTimer = Double.random(in: 1.2...2.4)
+                                activeDragScreenOffset = .zero
+                                onDragStateChanged(false)
                             }
                     )
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .frame(width: size.width, height: size.height)
+            .contentShape(Rectangle())
             .onAppear {
-                refreshPetsIfNeeded(shelfYs: shelfYs, size: size)
+                refreshPetsIfNeeded()
                 lastTick = Date()
             }
             .onChange(of: sprites.map(\.id)) { _, _ in
-                refreshPetsIfNeeded(shelfYs: shelfYs, size: size)
+                refreshPetsIfNeeded()
             }
             .onReceive(tickTimer) { now in
                 let dt = min(max(now.timeIntervalSince(lastTick), 0), 1.0 / 20.0)
@@ -3325,60 +3379,342 @@ private struct PixelGardenPlaygroundView: View {
                 guard !pets.isEmpty else { return }
 
                 for index in pets.indices {
+                    if let activeDragPetID, pets[index].id == activeDragPetID { continue }
                     if pets[index].isHeld { continue }
 
-                    pets[index].velocity.height += CGFloat(900 * dt)
-                    pets[index].position.x += pets[index].velocity.width * CGFloat(dt)
-                    pets[index].position.y += pets[index].velocity.height * CGFloat(dt)
-
-                    let left = CGFloat(38)
-                    let right = max(left + 1, size.width - 38)
-                    if pets[index].position.x < left {
-                        pets[index].position.x = left
-                        pets[index].velocity.width = abs(pets[index].velocity.width) * 0.7
-                    } else if pets[index].position.x > right {
-                        pets[index].position.x = right
-                        pets[index].velocity.width = -abs(pets[index].velocity.width) * 0.7
-                    }
-
-                    let shelfLandingY = shelfYs[pets[index].shelfIndex] - 36
-                    if pets[index].position.y > floorY - 38 {
-                        pets[index].position.y = floorY - 38
-                        pets[index].velocity.height = 0
-                        pets[index].velocity.width = max(-80, min(80, pets[index].velocity.width))
-                    } else if pets[index].position.y >= shelfLandingY && pets[index].velocity.height > 0 {
-                        pets[index].position.y = shelfLandingY
-                        pets[index].velocity.height = 0
-                        if abs(pets[index].velocity.width) < 8 {
-                            pets[index].velocity.width = CGFloat.random(in: -35...35)
+                    if pets[index].isAirborne {
+                        let gravity: CGFloat = 1650
+                        let airDamping: CGFloat = 0.996
+                        let maxLiftAbovePlane: CGFloat = 460
+                        pets[index].airborneVelocity.height += gravity * CGFloat(dt)
+                        pets[index].airborneScreenPosition.x += pets[index].airborneVelocity.width * CGFloat(dt)
+                        pets[index].airborneScreenPosition.y += pets[index].airborneVelocity.height * CGFloat(dt)
+                        pets[index].airborneVelocity.width *= airDamping
+                        pets[index].airborneVelocity.height *= airDamping
+                        if abs(pets[index].airborneVelocity.width) > 12 {
+                            pets[index].facingDirection = pets[index].airborneVelocity.width < 0 ? -1 : 1
                         }
+
+                        let projectedGround = project(world: pets[index].worldPosition, iso: iso)
+                        let minAirY = projectedGround.y - 30 - maxLiftAbovePlane
+                        if pets[index].airborneScreenPosition.y < minAirY {
+                            pets[index].airborneScreenPosition.y = minAirY
+                            if pets[index].airborneVelocity.height < 0 {
+                                pets[index].airborneVelocity.height *= -0.35
+                            }
+                        }
+
+                        let airWorld = unproject(
+                            screen: CGPoint(
+                                x: pets[index].airborneScreenPosition.x,
+                                y: pets[index].airborneScreenPosition.y + 30
+                            ),
+                            iso: iso
+                        )
+                        let planeInset: CGFloat = 0.45
+                        let landingInset: CGFloat = 1.05
+                        let inPlaneBounds =
+                            airWorld.x >= planeInset &&
+                            airWorld.x <= (worldBounds.width - planeInset) &&
+                            airWorld.y >= planeInset &&
+                            airWorld.y <= (worldBounds.height - planeInset)
+                        let worldInPlane =
+                            airWorld.x >= landingInset &&
+                            airWorld.x <= (worldBounds.width - landingInset) &&
+                            airWorld.y >= landingInset &&
+                            airWorld.y <= (worldBounds.height - landingInset)
+
+                        if inPlaneBounds {
+                            pets[index].offPlaneDuration = 0
+                        } else {
+                            pets[index].offPlaneDuration += dt
+                        }
+
+                        if pets[index].offPlaneDuration > 1.6 {
+                            let returnTarget = CGPoint(
+                                x: CGFloat.random(in: landingInset...(worldBounds.width - landingInset)),
+                                y: CGFloat.random(in: landingInset...(worldBounds.height - landingInset))
+                            )
+                            pets[index].worldPosition = returnTarget
+                            let returnGround = project(world: returnTarget, iso: iso)
+                            pets[index].airborneScreenPosition = CGPoint(
+                                x: returnGround.x,
+                                y: returnGround.y - (size.height + 520)
+                            )
+                            pets[index].airborneVelocity = CGSize(width: 0, height: 110)
+                            pets[index].offPlaneDuration = 0
+                        }
+
+                        if worldInPlane && pets[index].airborneVelocity.height > 0 {
+                            pets[index].isAirborne = false
+                            let landedPoint = CGPoint(
+                                x: min(max(airWorld.x, landingInset), worldBounds.width - landingInset),
+                                y: min(max(airWorld.y, landingInset), worldBounds.height - landingInset)
+                            )
+                            pets[index].worldPosition = landedPoint
+                            pets[index].velocity.width += max(-2.6, min(2.6, pets[index].airborneVelocity.width / 300))
+                            pets[index].velocity.height += max(-2.6, min(2.6, pets[index].airborneVelocity.height / 300))
+                            pets[index].airborneVelocity = .zero
+                            pets[index].offPlaneDuration = 0
+                        }
+                        continue
                     }
+
+                    pets[index].wanderTimer -= dt
+                    if pets[index].wanderTimer <= 0 {
+                        pets[index].wanderTimer = Double.random(in: 0.8...2.1)
+                        pets[index].wanderHeading = CGSize(
+                            width: CGFloat.random(in: -1...1),
+                            height: CGFloat.random(in: -1...1)
+                        )
+                    }
+
+                    let wanderAcceleration: CGFloat = 0.95
+                    pets[index].velocity.width += pets[index].wanderHeading.width * wanderAcceleration * CGFloat(dt)
+                    pets[index].velocity.height += pets[index].wanderHeading.height * wanderAcceleration * CGFloat(dt)
+
+                    let maxSpeed: CGFloat = 2.6
+                    pets[index].velocity.width = max(-maxSpeed, min(maxSpeed, pets[index].velocity.width))
+                    pets[index].velocity.height = max(-maxSpeed, min(maxSpeed, pets[index].velocity.height))
+
+                    pets[index].worldPosition.x += pets[index].velocity.width * CGFloat(dt)
+                    pets[index].worldPosition.y += pets[index].velocity.height * CGFloat(dt)
+
+                    let damping: CGFloat = 0.986
+                    pets[index].velocity.width *= damping
+                    pets[index].velocity.height *= damping
+                    if abs(pets[index].velocity.width) > 0.08 {
+                        pets[index].facingDirection = pets[index].velocity.width < 0 ? -1 : 1
+                    }
+
+                    let minX: CGFloat = 0.45
+                    let maxX: CGFloat = worldBounds.width - 0.45
+                    let minY: CGFloat = 0.45
+                    let maxY: CGFloat = worldBounds.height - 0.45
+                    let bounce: CGFloat = 0.72
+
+                    if pets[index].worldPosition.x < minX {
+                        pets[index].worldPosition.x = minX
+                        pets[index].velocity.width = abs(pets[index].velocity.width) * bounce
+                    } else if pets[index].worldPosition.x > maxX {
+                        pets[index].worldPosition.x = maxX
+                        pets[index].velocity.width = -abs(pets[index].velocity.width) * bounce
+                    }
+
+                    if pets[index].worldPosition.y < minY {
+                        pets[index].worldPosition.y = minY
+                        pets[index].velocity.height = abs(pets[index].velocity.height) * bounce
+                    } else if pets[index].worldPosition.y > maxY {
+                        pets[index].worldPosition.y = maxY
+                        pets[index].velocity.height = -abs(pets[index].velocity.height) * bounce
+                    }
+
                 }
+            }
+            .onDisappear {
+                onDragStateChanged(false)
             }
         }
     }
 
-    private func refreshPetsIfNeeded(shelfYs: [CGFloat], size: CGSize) {
+    private func refreshPetsIfNeeded() {
         guard pets.map(\.sprite.id) != sprites.map(\.id) else { return }
         pets = sprites.enumerated().map { index, sprite in
-            let shelf = index % shelfYs.count
             return GardenPet(
                 sprite: sprite,
-                position: CGPoint(x: CGFloat.random(in: 70...(max(80, size.width - 70))), y: shelfYs[shelf] - 36),
-                velocity: CGSize(width: CGFloat.random(in: -20...20), height: 0),
-                shelfIndex: shelf
+                worldPosition: CGPoint(
+                    x: CGFloat.random(in: 0.8...(worldBounds.width - 0.8)),
+                    y: CGFloat.random(in: 0.8...(worldBounds.height - 0.8))
+                ),
+                velocity: CGSize(
+                    width: CGFloat.random(in: -0.45...0.45),
+                    height: CGFloat.random(in: -0.45...0.45)
+                )
             )
         }
+    }
+
+    private func isoMetrics(for size: CGSize) -> IsometricMetrics {
+        let tileWidth = min(size.width * 0.11, 52)
+        let tileHeight = tileWidth * 0.54
+        let origin = CGPoint(x: size.width * 0.50, y: size.height * 0.46)
+        return IsometricMetrics(origin: origin, tileWidth: tileWidth, tileHeight: tileHeight, worldSize: worldBounds)
+    }
+
+    private func project(world: CGPoint, iso: IsometricMetrics) -> CGPoint {
+        let centeredX = world.x - (iso.worldSize.width / 2)
+        let centeredY = world.y - (iso.worldSize.height / 2)
+        return CGPoint(
+            x: iso.origin.x + (centeredX - centeredY) * (iso.tileWidth / 2),
+            y: iso.origin.y + (centeredX + centeredY) * (iso.tileHeight / 2)
+        )
+    }
+
+    private func unproject(screen: CGPoint, iso: IsometricMetrics) -> CGPoint {
+        let dx = screen.x - iso.origin.x
+        let dy = screen.y - iso.origin.y
+        let a = dx / (iso.tileWidth / 2)
+        let b = dy / (iso.tileHeight / 2)
+        let centeredX = (a + b) / 2
+        let centeredY = (b - a) / 2
+        return CGPoint(
+            x: centeredX + (iso.worldSize.width / 2),
+            y: centeredY + (iso.worldSize.height / 2)
+        )
+    }
+
+    private func clampedWorldPoint(_ point: CGPoint) -> CGPoint {
+        CGPoint(
+            x: min(max(point.x, 0.45), worldBounds.width - 0.45),
+            y: min(max(point.y, 0.45), worldBounds.height - 0.45)
+        )
     }
 }
 
 private struct GardenPet: Identifiable {
     let id = UUID()
     let sprite: TamagotchiSpriteProfile
-    var position: CGPoint
+    var worldPosition: CGPoint
     var velocity: CGSize
-    var shelfIndex: Int
     var isHeld = false
+    var isAirborne = false
+    var airborneScreenPosition: CGPoint = .zero
+    var airborneVelocity: CGSize = .zero
+    var offPlaneDuration: TimeInterval = 0
+    var facingDirection: CGFloat = 1
+    var wanderHeading: CGSize = .zero
+    var wanderTimer: TimeInterval = Double.random(in: 0.5...1.6)
+}
+
+private struct IsometricMetrics {
+    let origin: CGPoint
+    let tileWidth: CGFloat
+    let tileHeight: CGFloat
+    let worldSize: CGSize
+}
+
+private struct IsometricGardenFallbackBackground: View {
+    let iso: IsometricMetrics
+
+    var body: some View {
+        ZStack {
+            let columns = Int(iso.worldSize.width)
+            let rows = Int(iso.worldSize.height)
+            let depth = max(22, iso.tileHeight * 1.6)
+
+            let topLeft = project(world: CGPoint(x: 0, y: 0), iso: iso)
+            let topRight = project(world: CGPoint(x: iso.worldSize.width, y: 0), iso: iso)
+            let bottomRight = project(world: CGPoint(x: iso.worldSize.width, y: iso.worldSize.height), iso: iso)
+            let bottomLeft = project(world: CGPoint(x: 0, y: iso.worldSize.height), iso: iso)
+
+            // Right side wall.
+            Path { path in
+                path.move(to: topRight)
+                path.addLine(to: bottomRight)
+                path.addLine(to: CGPoint(x: bottomRight.x, y: bottomRight.y + depth))
+                path.addLine(to: CGPoint(x: topRight.x, y: topRight.y + depth))
+                path.closeSubpath()
+            }
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.52, green: 0.35, blue: 0.20).opacity(0.95),
+                        Color(red: 0.39, green: 0.25, blue: 0.14).opacity(0.98)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+
+            // Front side wall.
+            Path { path in
+                path.move(to: bottomLeft)
+                path.addLine(to: bottomRight)
+                path.addLine(to: CGPoint(x: bottomRight.x, y: bottomRight.y + depth))
+                path.addLine(to: CGPoint(x: bottomLeft.x, y: bottomLeft.y + depth))
+                path.closeSubpath()
+            }
+            .fill(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.58, green: 0.39, blue: 0.23).opacity(0.95),
+                        Color(red: 0.43, green: 0.29, blue: 0.17).opacity(0.98)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
+
+            // Vertical seams on side walls to suggest stacked tile depth.
+            Path { path in
+                for x in 0...columns {
+                    let p = project(world: CGPoint(x: CGFloat(x), y: iso.worldSize.height), iso: iso)
+                    path.move(to: p)
+                    path.addLine(to: CGPoint(x: p.x, y: p.y + depth))
+                }
+                for y in 0...rows {
+                    let p = project(world: CGPoint(x: iso.worldSize.width, y: CGFloat(y)), iso: iso)
+                    path.move(to: p)
+                    path.addLine(to: CGPoint(x: p.x, y: p.y + depth))
+                }
+            }
+            .stroke(Color.black.opacity(0.12), lineWidth: 1)
+
+            ForEach(0..<columns, id: \.self) { x in
+                ForEach(0..<rows, id: \.self) { y in
+                    let top = project(world: CGPoint(x: CGFloat(x), y: CGFloat(y)), iso: iso)
+                    let right = project(world: CGPoint(x: CGFloat(x + 1), y: CGFloat(y)), iso: iso)
+                    let bottom = project(world: CGPoint(x: CGFloat(x + 1), y: CGFloat(y + 1)), iso: iso)
+                    let left = project(world: CGPoint(x: CGFloat(x), y: CGFloat(y + 1)), iso: iso)
+                    let axisBandA = (x % 3) == 0
+                    let axisBandB = (y % 3) == 0
+
+                    Path { path in
+                        path.move(to: top)
+                        path.addLine(to: right)
+                        path.addLine(to: bottom)
+                        path.addLine(to: left)
+                        path.closeSubpath()
+                    }
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                (axisBandA ? Color(red: 0.72, green: 0.90, blue: 0.62) : Color(red: 0.64, green: 0.84, blue: 0.56)).opacity(0.92),
+                                (axisBandB ? Color(red: 0.53, green: 0.78, blue: 0.47) : Color(red: 0.47, green: 0.72, blue: 0.44)).opacity(0.92)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                }
+            }
+
+            Path { path in
+                for x in 0...columns {
+                    let start = project(world: CGPoint(x: CGFloat(x), y: 0), iso: iso)
+                    let end = project(world: CGPoint(x: CGFloat(x), y: iso.worldSize.height), iso: iso)
+                    path.move(to: start)
+                    path.addLine(to: end)
+                }
+                for y in 0...rows {
+                    let start = project(world: CGPoint(x: 0, y: CGFloat(y)), iso: iso)
+                    let end = project(world: CGPoint(x: iso.worldSize.width, y: CGFloat(y)), iso: iso)
+                    path.move(to: start)
+                    path.addLine(to: end)
+                }
+            }
+            .stroke(Color.white.opacity(0.22), lineWidth: 1)
+        }
+    }
+
+    private func project(world: CGPoint, iso: IsometricMetrics) -> CGPoint {
+        let centeredX = world.x - (iso.worldSize.width / 2)
+        let centeredY = world.y - (iso.worldSize.height / 2)
+        return CGPoint(
+            x: iso.origin.x + (centeredX - centeredY) * (iso.tileWidth / 2),
+            y: iso.origin.y + (centeredX + centeredY) * (iso.tileHeight / 2)
+        )
+    }
 }
 
 private struct PixelTamagotchi: View {
@@ -3394,6 +3730,7 @@ private struct PixelTamagotchi: View {
     var showsLevelProgress: Bool = true
     var labelOffsetY: CGFloat = 0
     var isSleeping: Bool = false
+    var facingDirection: CGFloat = 1
 
     var body: some View {
         VStack(spacing: showsLabels ? 10 : 0) {
@@ -3428,6 +3765,7 @@ private struct PixelTamagotchi: View {
                             .offset(x: artSize * 0.08, y: artSize * 0.02)
                     }
                 }
+                .scaleEffect(x: facingDirection, y: 1, anchor: .center)
                 .opacity(isSleeping ? 0.58 : 1)
                 .saturation(isSleeping ? 0.30 : 1)
                 .rotationEffect(.degrees(isSleeping ? -8 : 0))
